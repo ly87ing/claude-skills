@@ -1,16 +1,6 @@
 ---
 name: performance-troubleshoot
-description: |
-  Analyze and solve performance and resource issues with automated multi-round reviews.
-  触发关键词 (中文): 内存暴涨、OOM、GC频繁、响应慢、CPU高、消息积压、资源泄露、性能排查
-  Use when:
-  - Resource issues: memory spikes, OOM, GC pressure, object creation storms, resource leaks
-  - Performance issues: high CPU, slow response, lock contention, IO blocking, slow queries
-  - Concurrent issues: race conditions, deadlocks, thread pool exhaustion, thread dump analysis
-  - System issues: message backlog, cascade failures, connection exhaustion, heap dump analysis
-  - Real-time systems: Actor/Akka, WebSocket, broadcast optimization
-  - Cache issues: cache penetration, cache avalanche, hot key
-  Applicable to: API services, message queues, real-time push, databases, microservices.
+description: Troubleshoot performance and resource issues including memory spikes, OOM, GC pressure, high CPU, slow response, message backlog, and resource leaks. Use when user reports memory surge (内存暴涨), OOM errors (内存溢出), frequent GC (GC频繁), high CPU usage (CPU高), slow response (响应慢), message backlog (消息积压), resource leaks (资源泄露), or needs performance troubleshooting (性能排查). Applicable to API services, message queues, real-time systems, databases, and microservices.
 ---
 
 # 性能问题排查 Skill (Performance Troubleshoot)
