@@ -2,6 +2,17 @@
 
 详细的诊断决策树、反模式警示、优化模式等参考内容。
 
+## 目录
+- [症状→诊断→处方决策树](#症状诊断处方决策树)
+- [云原生资源陷阱](#云原生资源陷阱-cloud-native-pitfalls)
+- [稳定性保障模式](#稳定性保障模式-resilience-patterns)
+- [性能反模式进阶](#性能反模式进阶-advanced-anti-patterns)
+- [快速诊断表](#快速诊断表)
+- [反模式警示](#反模式警示)
+- [日志算术参考](#日志算术参考-log-math)
+- [诊断工具推荐](#诊断工具推荐)
+- [详细分析方法](#详细分析方法)
+
 ---
 
 ## 症状→诊断→处方决策树
@@ -206,6 +217,37 @@ if (instance == null) {
 private static volatile Instance instance;  // 添加 volatile
 ```
 
+### 反模式 5: 缓存穿透与惊群效应 (Cache Stampede)
+
+**现象**：缓存失效瞬间，大量请求同时穿透到数据库。
+
+```java
+// [错误] 所有线程同时查库
+public User getUser(Long id) {
+    User user = cache.get(id);
+    if (user == null) {
+        user = db.query(id);  // 100个线程同时执行!
+        cache.put(id, user);
+    }
+    return user;
+}
+
+// [正确] 使用互斥锁或 singleflight
+public User getUser(Long id) {
+    User user = cache.get(id);
+    if (user == null) {
+        synchronized (("user:" + id).intern()) {  // 锁粒度为单个 key
+            user = cache.get(id);  // double-check
+            if (user == null) {
+                user = db.query(id);
+                cache.put(id, user);
+            }
+        }
+    }
+    return user;
+}
+```
+
 ### 反模式 6: 放大效应 (Amplification)
 
 **现象**：单个请求触发了下游的 N 次操作，或者广播给了 M 个终端。
@@ -291,3 +333,56 @@ graph TD
 | 资源耗尽 | lsof, netstat, arthas (dashboard) | 句柄/连接数监控 |
 | 消息积压 | mqadmin, kafka-consumer-groups | 积压量 (Lag) 监控 |
 | 服务不可用 | tshark, tcpdump | 网络抓包、协议分析 |
+
+---
+
+## 详细分析方法
+
+### 侦察 (Reconnaissance)
+
+- **技术栈识别**：读取 `pom.xml`/`build.gradle`
+- **关键指纹匹配**：
+  - `akka`, `actor` → Akka 检查 (Mailbox, Dispatcher)
+  - `reactor`, `webflux` → Reactive 检查 (Backpressure)
+  - `netty` → Netty 检查 (ByteBuf泄露, EventLoop阻塞)
+  - `mybatis`, `hibernate` → ORM 检查 (N+1, 缓存)
+- **云原生检查**：确认 `Xmx` 与 `resources.limits` 是否冲突
+
+### 关键词搜索
+
+| 问题类型 | 搜索模式 |
+|----------|----------|
+| CPU | `while(true)`, `json.Marshal`, `Protobuf.parse` |
+| 内存 | `new .*List`, `stream.*collect`, `static Map` |
+| 放大 | `forEach`, `broadcast`, `.tell(`, `for (` |
+| 资源 | `ConnectTimeout`, `max-threads`, `max-connections` |
+| 超时 | `synchronized`, `Thread.sleep`, `lock` |
+
+**安全搜索规则**：
+```bash
+--exclude-dir={node_modules,target,.git,build} | head -n 20
+```
+
+### 日志分析
+
+- **大文件防御**：严禁 `cat` 超过 100MB 日志，使用 `tail -n 500` 或 `grep ERROR | head`
+- **Trace ID 抽样**：提取一个 trace_id，跨文件搜索还原请求链路
+- **日志算术**：计算放大倍数 = 执行次数 / 触发次数
+
+### 症状关联矩阵
+
+| 组合现象 | 可能根因 | 验证方向 |
+|----------|----------|----------|
+| CPU高 + 吞吐低 | 锁竞争 | 检查 synchronized |
+| CPU高 + 频繁GC | GC Thrashing | 优先排查内存 |
+| 延迟高 + CPU低 | IO阻塞 | 检查下游超时 |
+| OOM + 流量突增 | 无界队列 | 检查 LinkedBlockingQueue |
+
+### GC 诊断表
+
+| GC 现象 | 诊断结论 | 应对策略 |
+|---------|----------|----------|
+| Full GC 后内存大降 | Memory Churn | 优化对象创建 |
+| Full GC 后内存居高 | Memory Leak | 搜索 static Map |
+| Young GC 极频繁 | 分配过快 | 扩容 Eden |
+
