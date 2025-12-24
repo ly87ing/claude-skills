@@ -49,6 +49,81 @@ graph TD
 
 ---
 
+## 多语言诊断特征表 (Polyglot Diagnostics)
+
+不同语言的运行时行为差异巨大，请勿生搬硬套 JVM 理论。
+
+| 维度 | **Java (JVM)** | **Go (Golang)** | **Node.js (V8)** |
+|------|----------------|-----------------|------------------|
+| **内存模型** | 堆分代 (Young/Old), 复杂的 GC 算法 (G1/ZGC) | 无分代 (一直混合 GC), Scavenge 很少 | 堆分代 (Scavenge/Mark-Sweep) |
+| **OOM 特征** | `java.lang.OutOfMemoryError` (堆满) | `runtime: out of memory` (通常直接 Crash) | `FATAL ERROR: Ineffective mark-compacts` |
+| **CPU 瓶颈** | 线程切换, 锁竞争, GC | Goroutine 调度, 锁自旋 | **Event Loop 阻塞** (单线程被卡死) |
+| **并发模型** | Thread (OS 线程) | Goroutine (M:N 调度) | Event Loop + Worker Threads |
+| **关键物料** | Jstack, Heap Dump (hprof) | **pprof** (goroutine, heap, profile) | **Heap Snapshot**, Clinic Doctor |
+| **常见陷阱** | 线程池耗尽, Full GC | **Goroutine 泄露**, Channel 阻塞 | **同步代码阻塞 EventLoop**, Promise 链过长 |
+
+---
+
+## 云原生资源陷阱 (Cloud Native Pitfalls)
+
+在 Docker/Kubernetes 环境下，应用看到的资源可能与实际限制不符。
+
+### 1. 容器配额限制 (Cgroups)
+**现象**：应用没报 OOM，但容器直接重启 (OOMKilled)。
+**原因**：应用内存 (App Memory) > 容器限制 (K8s Limits)。
+**检查**：
+- `cat /sys/fs/cgroup/memory/memory.limit_in_bytes`
+- 检查 K8s YAML: `resources.limits.memory`
+- **反模式**：Java `Xmx` 设置为 4G，但 K8s Limit 设置为 2G。
+
+### 2. CPU 节流 (CPU Throttling)
+**现象**：CPU 使用率看似不高，但响应极慢。
+**原因**：CFS Quota 限制。应用在短时间内用光了 CPU 配额，被 OS 强制挂起 (Throttled)。
+**检查**：
+- `cat /sys/fs/cgroup/cpu/cpu.stat` (看 `nr_throttled`)
+- **反模式**：设置了过于严格的 `resources.limits.cpu` (如 100m)，导致启动时或高负载时被频繁节流。
+
+---
+
+## 稳定性保障模式 (Resilience Patterns)
+
+### 1. 舱壁模式 (Bulkhead)
+**原理**：像船舱一样隔离资源，防止一个模块的故障耗尽所有资源（如线程池）。
+**实现**：
+- 为核心业务（如下单）和非核心业务（如日志上报）使用**独立的线程池**。
+- 为不同的下游依赖（如 Redis, MySQL, 外部API）设置独立的连接池配额。
+
+### 2. 熔断与降级 (Circuit Breaker)
+**原理**：下游不可用时，快速失败，避免线程阻塞。
+**反模式**：
+- `catch (Exception e) { return null; }` (单纯吞掉异常不是降级)
+- **正确做法**：使用 Resilience4j/Sentinel，配置失败率阈值，触发熔断后直接返回缓存值或默认值。
+
+### 3. 防止重试风暴 (Retry Storm Prevention)
+**现象**：N 个客户端同时超时，同时重试，流量瞬间翻倍，彻底压垮服务端。
+**解决方案**：
+- **指数退避 (Exponential Backoff)**: 第1次等1s，第2次等2s，第4次等4s...
+- **随机抖动 (Jitter)**: `wait_time = base * 2^n + random(0, 100ms)`
+- **熔断联动**: 下游挂了就禁止重试。
+
+---
+
+## 性能反模式进阶 (Advanced Anti-Patterns)
+
+### 反模式 8: 线程爆炸 (Thread Explosion)
+**现象**：使用 `CachedThreadPool` 或为每个请求创建一个线程。
+**后果**：
+- **CPU 浪费**：CPU 忙于在数千个线程间切换 (Context Switch)，没空执行业务。
+- **OOM**：每个线程栈占用 1MB 内存。
+**监控**：`vmstat` 查看 `cs` (context switch) 列；`jstack` 查看线程总数。
+
+### 反模式 9: 伪共享 (False Sharing)
+**现象**：多线程高频修改位于同一个缓存行 (Cache Line, 64 bytes) 的不同变量。
+**后果**：CPU 缓存失效，性能剧降。
+**解决**：使用 `@Contended` (Java 8+) 或手动填充字段 (Padding)。
+
+---
+
 ## 快速诊断表
 
 | 症状 | 可能原因 | 推荐模式 |
@@ -131,17 +206,60 @@ if (instance == null) {
 private static volatile Instance instance;  // 添加 volatile
 ```
 
-### 反模式 5: subList 返回视图
+### 反模式 6: 放大效应 (Amplification)
+
+**现象**：单个请求触发了下游的 N 次操作，或者广播给了 M 个终端。
 
 ```java
-// [错误] subList 返回的是视图，不是副本
-List<T> result = list.subList(0, 10);
-return result;  // 原列表变化会影响 result!
+// [错误] 1->N 放大
+// 每次循环都发起一次 DB/RPC 调用
+List<User> users = userDao.getUsers(); // 1次
+for (User user : users) {
+    userProfileDao.getProfile(user.getId()); // N次! (N+1 问题)
+}
 
-// [正确] 创建副本
-List<T> result = new ArrayList<>(list.subList(0, 10));
-return result;
+// [正确] 批量操作
+List<Long> userIds = users.stream().map(User::getId).collect(toList());
+userProfileDao.getProfiles(userIds); // 1次
 ```
+
+```java
+// [错误] 全量广播放大
+// 只要有一个人加入，就给全员发完整的 MemberList (假设有 1000 人)
+// 流量 = 1000 * SizeOf(MemberList)
+broadcast(new MemberList(allMembers));
+
+// [正确] 增量广播
+// 只发送变化的事件
+broadcast(new MemberJoinedEvent(newMember));
+```
+
+### 反模式 7: 框架陷阱 (Framework Pitfalls)
+
+| 框架 | 陷阱 | 描述 |
+|------|------|------|
+| **Akka** | Unbounded Mailbox | 默认邮箱无界，消费慢时内存无限积压导致 OOM |
+| **Reactor** | EmitterProcessor | (旧版) 默认无界缓冲，下游消费慢时积压 |
+| **Netty** | EventLoop 阻塞 | 在 IO 线程 (EventLoop) 中执行耗时业务逻辑 (如 DB)，导致整个 Reactor 卡死 |
+| **Netty** | ByteBuf 泄露 | 使用 `ReferenceCounted` 对象未释放，导致堆外内存泄露 |
+| **Hibernate** | Session 膨胀 | 长期持有的 Session 缓存了所有查询过的对象 (一级缓存) |
+
+---
+
+## 日志算术参考 (Log Math)
+
+通过日志统计来量化问题严重程度：
+
+**1. 放大倍数 (Amplification Factor)**
+$$ A = \frac{\text{执行次数 (下游/推送)}}{\text{触发次数 (上游/请求)}} $$
+- $A \approx 1$: 正常
+- $A > 10$: 存在轻微放大
+- $A > 100$: **严重放大 (P0 级问题)**
+
+**2. 浪费率 (Waste Rate)**
+$$ W = 1 - \frac{\text{有效操作数 (数据变更)}}{\text{总操作数 (执行次数)}} $$
+- $W > 50\%$: 低效
+- $W > 90\%$: **极度浪费 (通常意味着缺少 Dirty Check)**
 
 ---
 
