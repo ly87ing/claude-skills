@@ -8,6 +8,8 @@ export interface DetailedItem {
     verify?: string;        // 验证命令
     threshold?: string;     // 告警阈值
     fix?: string;           // 快速修复建议
+    why?: string;           // 原理说明（为什么会有这个问题）
+    ref?: string;           // 延伸阅读链接
 }
 
 // 章节定义
@@ -31,11 +33,11 @@ export const CHECKLIST_DATA: Record<string, ChecklistSection> = {
         title: '放大效应追踪',
         priority: 'P0',
         items: [
-            { desc: '流量入口排查（Controller, MQ Listener, Schedule Job, WebSocket）', verify: 'arthas: trace *Controller *', threshold: 'QPS > 1000 关注' },
-            { desc: '循环内 IO/计算（for/while/stream 内的 DB 查询、RPC）', verify: 'grep -n "for.*\\{" | 检查内部是否有 dao/rpc 调用', fix: '批量查询替代循环查询' },
-            { desc: '集合笛卡尔积（嵌套循环 O(N*M)）', verify: '搜索嵌套 for 循环', threshold: 'N*M > 10000 需优化' },
-            { desc: '广播风暴（单事件触发全量推送）', verify: '检查 @EventListener/@KafkaListener 处理逻辑' },
-            { desc: '频繁对象创建（循环内 new 对象）', verify: 'async-profiler -e alloc', fix: '对象池/复用' }
+            { desc: '流量入口排查（Controller, MQ Listener, Schedule Job, WebSocket）', verify: 'arthas: trace *Controller *', threshold: 'QPS > 1000 关注', why: '入口是性能问题的放大器，1个入口的慢操作会被流量放大N倍' },
+            { desc: '循环内 IO/计算（for/while/stream 内的 DB 查询、RPC）', verify: 'grep -n "for.*\\{" | 检查内部是否有 dao/rpc 调用', fix: '批量查询替代循环查询', why: '循环100次 x 每次10ms = 1秒，这是最常见的性能杀手' },
+            { desc: '集合笛卡尔积（嵌套循环 O(N*M)）', verify: '搜索嵌套 for 循环', threshold: 'N*M > 10000 需优化', why: '时间复杂度爆炸：100x100=1万次，应该用 Map 降到 O(N+M)' },
+            { desc: '广播风暴（单事件触发全量推送）', verify: '检查 @EventListener/@KafkaListener 处理逻辑', why: '1条消息触发推送给10万用户，瞬间产生10万次IO' },
+            { desc: '频繁对象创建（循环内 new 对象）', verify: 'async-profiler -e alloc', fix: '对象池/复用', why: '频繁 new 导致 GC 压力，Young GC 频繁会影响吞吐' }
         ]
     },
     '1': {
@@ -43,10 +45,10 @@ export const CHECKLIST_DATA: Record<string, ChecklistSection> = {
         title: '锁与并发',
         priority: 'P0',
         items: [
-            { desc: '锁粒度过大（synchronized 方法或大代码块）', verify: 'jstack | grep -A 20 "BLOCKED"', fix: '细化锁粒度/读写锁' },
-            { desc: '锁竞争（高频访问的共享资源）', verify: 'arthas: monitor -c 5 锁方法', threshold: '等待时间 > 100ms' },
-            { desc: '死锁风险（嵌套锁获取顺序不一致）', verify: 'jstack | grep "deadlock"' },
-            { desc: 'CAS 自旋（Atomic 的 do-while 无退避）', verify: '搜索 AtomicInteger/AtomicLong 使用处', fix: 'LongAdder 替代' }
+            { desc: '锁粒度过大（synchronized 方法或大代码块）', verify: 'jstack | grep -A 20 "BLOCKED"', fix: '细化锁粒度/读写锁', why: '大锁让并发变串行，N个线程只能1个执行，CPU利用率低' },
+            { desc: '锁竞争（高频访问的共享资源）', verify: 'arthas: monitor -c 5 锁方法', threshold: '等待时间 > 100ms', why: '线程等锁时处于 BLOCKED 状态，无法执行任何工作' },
+            { desc: '死锁风险（嵌套锁获取顺序不一致）', verify: 'jstack | grep "deadlock"', why: '线程A持有锁1等锁2，线程B持有锁2等锁1，永远等待' },
+            { desc: 'CAS 自旋（Atomic 的 do-while 无退避）', verify: '搜索 AtomicInteger/AtomicLong 使用处', fix: 'LongAdder 替代', why: '高竞争下 CAS 频繁失败重试，CPU 空转浪费' }
         ]
     },
     '2': {
@@ -54,9 +56,9 @@ export const CHECKLIST_DATA: Record<string, ChecklistSection> = {
         title: 'IO 与阻塞',
         priority: 'P0',
         items: [
-            { desc: '同步 IO（NIO/Netty 线程中混入阻塞操作）', verify: '检查 EventLoop 线程内是否有 JDBC/File IO' },
-            { desc: '长耗时逻辑（Controller 入口未异步化）', verify: 'arthas: trace 入口方法', threshold: '耗时 > 500ms 需异步' },
-            { desc: '资源未关闭（InputStream/Connection 未 close）', verify: 'lsof -p PID | wc -l', threshold: '句柄 > 10000 告警', fix: 'try-with-resources' }
+            { desc: '同步 IO（NIO/Netty 线程中混入阻塞操作）', verify: '检查 EventLoop 线程内是否有 JDBC/File IO', why: 'EventLoop 线程被阻塞后，该线程上的所有连接都无法处理' },
+            { desc: '长耗时逻辑（Controller 入口未异步化）', verify: 'arthas: trace 入口方法', threshold: '耗时 > 500ms 需异步', why: '一个线程被长操作占用，线程池有效并发度下降' },
+            { desc: '资源未关闭（InputStream/Connection 未 close）', verify: 'lsof -p PID | wc -l', threshold: '句柄 > 10000 告警', fix: 'try-with-resources', why: '资源泄露导致句柄耗尽，新连接无法建立' }
         ]
     },
     '3': {
@@ -74,9 +76,9 @@ export const CHECKLIST_DATA: Record<string, ChecklistSection> = {
         title: '资源池管理',
         priority: 'P0',
         items: [
-            { desc: '无界线程池（Executors.newCachedThreadPool）', verify: 'arthas: thread -n 10', threshold: '线程 > 200 告警', fix: 'ThreadPoolExecutor 有界' },
-            { desc: '池资源泄露（获取后未归还）', verify: 'jstack | grep pool', fix: 'finally 归还' },
-            { desc: '连接数配置不当', verify: 'show processlist (MySQL)', threshold: '活跃连接 > 80% 池大小' }
+            { desc: '无界线程池（Executors.newCachedThreadPool）', verify: 'arthas: thread -n 10', threshold: '线程 > 200 告警', fix: 'ThreadPoolExecutor 有界', why: '无界池遇到流量洪峰无限创建线程，耗尽系统资源后 OOM' },
+            { desc: '池资源泄露（获取后未归还）', verify: 'jstack | grep pool', fix: 'finally 归还', why: '每次请求泄露1个连接，池很快被占满，新请求永远等待' },
+            { desc: '连接数配置不当', verify: 'show processlist (MySQL)', threshold: '活跃连接 > 80% 池大小', why: '池太小导致排队等待，池太大导致数据库压力和上下文切换' }
         ]
     },
     '5': {
@@ -84,9 +86,9 @@ export const CHECKLIST_DATA: Record<string, ChecklistSection> = {
         title: '内存与缓存',
         priority: 'P0',
         items: [
-            { desc: '无界缓存（static Map 无 TTL/Size 限制）', verify: 'jmap -histo:live | head -20', fix: 'Caffeine/Guava Cache' },
-            { desc: '大对象分配（一次性加载大文件/全量表）', verify: 'MAT 分析 Dominator Tree', threshold: '单对象 > 10MB 关注' },
-            { desc: 'ThreadLocal 泄露（请求结束未 remove）', verify: '搜索 ThreadLocal 未配对 remove()', fix: 'finally 中 remove()' }
+            { desc: '无界缓存（static Map 无 TTL/Size 限制）', verify: 'jmap -histo:live | head -20', fix: 'Caffeine/Guava Cache', why: '只增不删的缓存是内存泄露，最终导致 OOM' },
+            { desc: '大对象分配（一次性加载大文件/全量表）', verify: 'MAT 分析 Dominator Tree', threshold: '单对象 > 10MB 关注', why: '大对象直接进入老年代，触发 Full GC 导致长时间停顿' },
+            { desc: 'ThreadLocal 泄露（请求结束未 remove）', verify: '搜索 ThreadLocal 未配对 remove()', fix: 'finally 中 remove()', why: '线程池复用线程，ThreadLocal 不清理导致内存累积和业务数据混乱' }
         ]
     },
     '6': {
