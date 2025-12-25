@@ -21,7 +21,7 @@ description: Diagnoses Java performance issues including slow response, high CPU
 
 ### Step 1: 获取诊断信息
 
-**优先尝试 MCP**（如果可用）：
+**优先使用 MCP 工具**（如果可用）：
 ```
 mcp__java-perf__diagnose_all({
   symptoms: ["cpu", "slow"],
@@ -30,73 +30,83 @@ mcp__java-perf__diagnose_all({
 })
 ```
 
-**MCP 不可用时，使用内置速查表**：
-
-<details>
-<summary>🔧 P0 验证命令速查表（点击展开）</summary>
-
-#### 内存问题 (memory/gc)
-| 检查项 | 验证命令 |
-|--------|----------|
-| 大对象 | `jmap -histo:live PID | head -20` |
-| 堆内存 | `jstat -gcutil PID 1000` |
-| ThreadLocal 泄露 | 搜索 `ThreadLocal` 未配对 `remove()` |
-| 无界缓存 | 搜索 `static.*Map` 无 TTL |
-
-#### CPU 问题 (cpu)
-| 检查项 | 验证命令 |
-|--------|----------|
-| 线程阻塞 | `jstack PID | grep -A 20 "BLOCKED"` |
-| 死锁 | `jstack PID | grep "deadlock"` |
-| CPU 热点 | `arthas: profiler start/stop` |
-| 锁竞争 | `arthas: monitor -c 5 类名 方法名` |
-
-#### 响应慢 (slow)
-| 检查项 | 验证命令 |
-|--------|----------|
-| 方法耗时 | `arthas: trace 类名 方法名` |
-| 慢 SQL | `EXPLAIN SELECT ...` |
-| N+1 查询 | 开启 SQL 日志，观察重复 SQL |
-| 外部调用超时 | 搜索 `timeout/connectTimeout` 配置 |
-
-#### 资源耗尽 (resource)
-| 检查项 | 验证命令 |
-|--------|----------|
-| 线程数 | `arthas: thread -n 10` |
-| 文件句柄 | `lsof -p PID | wc -l` |
-| 连接池 | `show processlist` (MySQL) |
-| 线程池状态 | `jstack PID | grep pool` |
-
-#### 消息积压 (backlog)
-| 检查项 | 验证命令 |
-|--------|----------|
-| 消费者阻塞 | 检查 `@KafkaListener/@RabbitListener` 方法 |
-| 队列堆积 | 检查 MQ 控制台 pending 数量 |
-
-</details>
+返回：诊断建议 + 检查项 + 搜索关键词
 
 ---
 
-### Step 2: 代码分析
+### Step 2: 代码分析（重要！）
 
-> **优先 LSP**，失败后用 Grep（加 `head_limit: 50`）
+> [!IMPORTANT]
+> **必须使用 `mcp__cclsp__*` 工具进行代码搜索**，不要手动 grep
 
-**搜索关键词**：
-| 症状 | LSP 搜索 | Grep 正则 |
-|------|----------|-----------|
-| memory | `ThreadLocal`, `ConcurrentHashMap` | `static.*Map\|ThreadLocal` |
-| cpu | `synchronized`, `ReentrantLock` | `synchronized\|ReentrantLock` |
-| slow | `HttpClient`, `Connection` | `HttpClient\|getConnection` |
-| resource | `ThreadPoolExecutor`, `DataSource` | `newCachedThreadPool\|DataSource` |
+**使用 cclsp 搜索性能问题代码**：
+
+```
+# 1. 搜索符号定义
+mcp__cclsp__find_symbol({ query: "synchronized" })
+mcp__cclsp__find_symbol({ query: "ThreadLocal" })
+
+# 2. 查找引用
+mcp__cclsp__find_references({ file: "xxx.java", line: 123, column: 10 })
+```
+
+**搜索关键词**（根据症状）：
+
+| 症状 | cclsp 搜索关键词 |
+|------|------------------|
+| memory | `ThreadLocal`, `ConcurrentHashMap`, `static Map` |
+| cpu | `synchronized`, `ReentrantLock`, `AtomicInteger` |
+| slow | `HttpClient`, `RestTemplate`, `@Transactional` |
+| resource | `ThreadPoolExecutor`, `DataSource`, `newCachedThreadPool` |
+| gc | `new ArrayList`, `StringBuilder`, `stream().` |
+
+**cclsp 不可用时**，使用 grep_search：
+```
+grep_search({ Query: "synchronized", SearchPath: "./", IsRegex: false })
+```
 
 ---
 
-### Step 3: 输出报告
+### Step 3: 定位问题
+
+对于找到的可疑代码，使用 cclsp 深入分析：
+
+```
+# 查看调用链
+mcp__cclsp__find_call_hierarchy({ 
+  file: "Service.java", 
+  line: 50, 
+  direction: "incoming"  # 谁调用了这个方法
+})
+
+# 查看类型定义
+mcp__cclsp__get_hover({ file: "xxx.java", line: 123, column: 10 })
+```
+
+---
+
+### Step 4: 输出报告
 
 每个问题必须包含：
-1. **位置**：`文件:行号`
+1. **位置**：`文件:行号`（用 cclsp 确认）
 2. **量化**：调用次数、放大倍数
 3. **修复代码**：可直接应用
+
+---
+
+## 内置速查表（MCP 不可用时）
+
+<details>
+<summary>🔧 P0 验证命令</summary>
+
+| 症状 | 验证命令 |
+|------|----------|
+| 内存 | `jmap -histo:live PID | head -20` |
+| CPU | `jstack PID | grep -A 20 "BLOCKED"` |
+| 慢 | `arthas: trace 类名 方法名` |
+| 资源 | `lsof -p PID | wc -l` |
+
+</details>
 
 ---
 
@@ -105,8 +115,22 @@ mcp__java-perf__diagnose_all({
 ### 用户
 > 系统响应慢，CPU 也很高
 
-### Claude
-1. **识别症状**：slow + cpu → 可能是锁竞争(60%)
-2. **验证**：`jstack PID | grep BLOCKED`
-3. **搜索**：`synchronized`, `ReentrantLock`
-4. **定位问题** → 输出修复方案
+### Claude 分析流程
+
+1. **获取诊断**：
+   ```
+   mcp__java-perf__diagnose_all({ symptoms: ["cpu", "slow"], priority: "P0" })
+   ```
+
+2. **搜索可疑代码**：
+   ```
+   mcp__cclsp__find_symbol({ query: "synchronized" })
+   mcp__cclsp__find_symbol({ query: "ReentrantLock" })
+   ```
+
+3. **分析调用链**：
+   ```
+   mcp__cclsp__find_call_hierarchy({ file: "锁方法.java", line: 行号 })
+   ```
+
+4. **输出修复方案**
