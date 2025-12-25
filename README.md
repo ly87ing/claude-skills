@@ -29,31 +29,45 @@ A Claude Skill + MCP Server for diagnosing Java performance issues.
 
 ## 🚀 Quick Start
 
-### 1. Install MCP Server
+### One-Click Install (推荐)
 
 ```bash
+git clone https://github.com/ly87ing/java-perf-skill.git
+cd java-perf-skill
+./install.sh
+```
+
+安装脚本会自动：
+- ✓ 编译 MCP Server
+- ✓ 注册 MCP 到 Claude Code
+- ✓ 安装 Skill 到 ~/.claude/skills
+
+### Uninstall
+
+```bash
+./uninstall.sh
+```
+
+### Manual Install
+
+<details>
+<summary>点击展开手动安装步骤</summary>
+
+```bash
+# 1. 编译 MCP Server
 cd mcp
 npm install
 npm run build
-```
 
-### 2. Add to Claude Code
-
-```bash
+# 2. 注册到 Claude Code
 claude mcp add java-perf -- node /path/to/mcp/dist/index.js
-```
 
-### 3. Install Skill
-
-```bash
-# Global installation
+# 3. 安装 Skill
 cp -r skill ~/.claude/skills/java-perf
-
-# Or project-specific
-cp -r skill /your-project/.agent/skills/java-perf
 ```
+</details>
 
-### 4. Use
+### Use
 
 Simply describe your performance issue:
 
