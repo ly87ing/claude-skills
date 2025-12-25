@@ -42,6 +42,17 @@ cd java-perf-skill
 - ✓ 注册 MCP 到 Claude Code
 - ✓ 安装 Skill 到 ~/.claude/skills
 
+### Update
+
+```bash
+./update.sh
+```
+
+更新脚本会自动：
+- ✓ 从 GitHub 拉取最新代码
+- ✓ 重新编译 MCP Server
+- ✓ 更新 Skill 文件
+
 ### Uninstall
 
 ```bash
