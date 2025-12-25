@@ -310,22 +310,15 @@ server.tool(
                     success: true,
                     query: { symptom, preferLsp, maxPatterns },
                     data: {
-                        recommendation: preferLsp
-                            ? 'LSP (cclsp) - 语义搜索，大幅节省 Token'
-                            : 'Grep - 文本搜索，需限制输出',
+                        recommendation: '⚠️ 必须使用 LSP (cclsp) 进行代码搜索，禁止直接 grep',
                         lspSymbols: limitedLsp,
                         grepPatterns: limitedGrep,
-                        instructions: preferLsp
-                            ? [
-                                '1. 先测试 LSP: mcp__cclsp__find_definition',
-                                '2. 使用 mcp__cclsp__find_references 查找引用',
-                                '3. 只返回位置，不占用大量 Context'
-                            ]
-                            : [
-                                '1. 使用 grep_search 搜索模式',
-                                '2. 必须添加 head_limit: 50',
-                                '3. 找到文件后用 view_file 定点读取'
-                            ]
+                        instructions: [
+                            '1. 【强制】使用 mcp__cclsp__find_symbol({ query: "关键词" })',
+                            '2. 【强制】找到后用 mcp__cclsp__find_call_hierarchy 分析调用链',
+                            '3. 【禁止】直接使用 grep_search，除非 cclsp 明确失败',
+                            '4. 如必须用 grep，需说明 cclsp 失败原因'
+                        ]
                     }
                 }, null, 2)
             }]
