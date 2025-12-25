@@ -8,14 +8,26 @@
 
 A Claude Skill + MCP Server for diagnosing Java performance issues.
 
-## Features
+## ✨ Features
 
 - **Natural Language Trigger**: Describe your problem, Claude activates automatically
 - **Token Efficient**: MCP tools return only relevant data (~93% token savings)
-- **Comprehensive Checklist**: 14 categories, 50+ check items
-- **Smart Diagnosis**: Symptom mapping, anti-pattern detection
+- **Comprehensive Checklist**: 17 categories, 70+ check items
+- **Smart Diagnosis**: Symptom combination, priority-based analysis
+- **Deep Knowledge**: Each check item includes verification commands and root cause explanations
 
-## Quick Start
+## 📊 Statistics
+
+| Metric | Count |
+|--------|-------|
+| MCP Tools | 6 |
+| Check Categories | 17 |
+| Check Items | 70+ |
+| With Verification Commands | 60+ |
+| With Root Cause Explanations | 58 |
+| Symptom Combinations | 6 |
+
+## 🚀 Quick Start
 
 ### 1. Install MCP Server
 
@@ -51,26 +63,41 @@ Simply describe your performance issue:
 消息队列出现大量积压...
 ```
 
-## Supported Symptoms
+## 🩺 Supported Symptoms
 
-| Type | Examples |
-|------|----------|
-| **Memory** | OOM, memory spike, GC pressure, leaks |
-| **CPU** | High usage, infinite loops, lock contention |
-| **Slow Response** | High latency, timeout, blocking |
-| **Resource Exhaustion** | Connection pool full, thread pool full |
-| **Message Backlog** | Queue buildup, consumption lag |
+| Type | Param | Examples |
+|------|-------|----------|
+| Memory | `memory` | OOM, memory spike, leaks |
+| CPU | `cpu` | High usage, lock contention |
+| Slow Response | `slow` | High latency, timeout |
+| GC Pressure | `gc` | Frequent GC, STW |
+| Resource | `resource` | Pool full |
+| Message Backlog | `backlog` | Queue buildup |
 
-## MCP Tools
+## 🔧 MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `get_checklist` | Get relevant check items by symptom |
-| `get_diagnosis` | Quick diagnosis reference |
-| `search_code_patterns` | Code search suggestions (LSP/Grep) |
-| `get_all_antipatterns` | Anti-pattern reference |
+| `get_checklist` | Check items with priority filter |
+| `get_diagnosis` | Single symptom diagnosis |
+| `get_combined_diagnosis` | Multi-symptom root cause analysis |
+| `search_code_patterns` | LSP/Grep search suggestions |
+| `get_all_antipatterns` | Anti-pattern quick reference |
+| `get_template` | Report template |
 
-## Directory Structure
+## 📋 Check Item Example
+
+```json
+{
+  "desc": "循环内 IO/计算",
+  "verify": "grep -n 'for.*{' 检查内部是否有 dao/rpc 调用",
+  "threshold": "N*M > 10000 需优化",
+  "fix": "批量查询替代循环查询",
+  "why": "循环100次 x 每次10ms = 1秒，这是最常见的性能杀手"
+}
+```
+
+## 📁 Directory Structure
 
 ```
 java-perf-skill/

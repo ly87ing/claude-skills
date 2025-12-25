@@ -96,9 +96,9 @@ export const CHECKLIST_DATA: Record<string, ChecklistSection> = {
         title: '异常处理',
         priority: 'P2',
         items: [
-            { desc: '异常吞没（catch 后仅打印）', verify: '搜索 catch.*\\{.*e.printStackTrace' },
-            { desc: '异常日志爆炸（高频打印完整堆栈）', verify: '日志文件大小增长速率', threshold: '日志 > 1GB/天 关注' },
-            { desc: '异常控制流程（用异常做业务控制）', verify: '搜索 catch 中的业务逻辑' }
+            { desc: '异常吞没（catch 后仅打印）', verify: '搜索 catch.*\\{.*e.printStackTrace', why: '异常被吞掉导致问题难以追溯和修复' },
+            { desc: '异常日志爆炸（高频打印完整堆栈）', verify: '日志文件大小增长速率', threshold: '日志 > 1GB/天 关注', why: '频繁打印堆栈消耗 CPU 和磁盘 IO' },
+            { desc: '异常控制流程（用异常做业务控制）', verify: '搜索 catch 中的业务逻辑', why: '异常开销大（栈堆栈捕获），不应用于正常流程' }
         ]
     },
     '10': {
@@ -145,11 +145,11 @@ export const CHECKLIST_DATA: Record<string, ChecklistSection> = {
         title: 'Java 特定',
         priority: 'P2',
         items: [
-            { desc: 'Stream 滥用（短集合用 Stream）', verify: 'async-profiler 热点分析', threshold: '集合 < 10 用 for', fix: 'for 循环替代' },
-            { desc: 'BigDecimal 重复创建', verify: '搜索 new BigDecimal', fix: 'BigDecimal.ZERO/ONE' },
-            { desc: '字符串拼接（循环内 + 拼接）', verify: '搜索循环内字符串 +', fix: 'StringBuilder' },
-            { desc: '反射调用（高频路径未缓存 Method）', verify: '搜索 getMethod/invoke', fix: '缓存 Method 对象' },
-            { desc: '装箱拆箱（Integer/Long 频繁自动装箱）', verify: 'async-profiler -e alloc', fix: '原始类型' }
+            { desc: 'Stream 滥用（短集合用 Stream）', verify: 'async-profiler 热点分析', threshold: '集合 < 10 用 for', fix: 'for 循环替代', why: 'Stream 创建中间对象开销大，小集合不值得' },
+            { desc: 'BigDecimal 重复创建', verify: '搜索 new BigDecimal', fix: 'BigDecimal.ZERO/ONE', why: '重复创建常用值浪费内存' },
+            { desc: '字符串拼接（循环内 + 拼接）', verify: '搜索循环内字符串 +', fix: 'StringBuilder', why: '每次 + 创建新对象，循环 N 次 = N 个临时对象' },
+            { desc: '反射调用（高频路径未缓存 Method）', verify: '搜索 getMethod/invoke', fix: '缓存 Method 对象', why: '反射每次查找方法开销大，缓存后快 10 倍' },
+            { desc: '装箱拆箱（Integer/Long 频繁自动装箱）', verify: 'async-profiler -e alloc', fix: '原始类型', why: '装箱创建对象，拆箱调用方法，在循环中开销明显' }
         ]
     },
     '15': {
