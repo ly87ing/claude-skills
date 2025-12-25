@@ -272,53 +272,27 @@ server.tool(
             .describe('返回的最大模式数量')
     },
     async ({ symptom, preferLsp, maxPatterns }) => {
-        const patterns: Record<string, { lsp: string[], grep: string[] }> = {
-            memory: {
-                lsp: ['ThreadLocal', 'ConcurrentHashMap', 'HashMap', 'ArrayList', 'LinkedList'],
-                grep: ['static.*Map|static.*List|ThreadLocal|ConcurrentHashMap']
-            },
-            cpu: {
-                lsp: ['synchronized', 'ReentrantLock', 'Pattern', 'Atomic', 'volatile'],
-                grep: ['synchronized|ReentrantLock|Pattern\\.compile|AtomicInteger']
-            },
-            slow: {
-                lsp: ['HttpClient', 'RestTemplate', 'WebClient', 'Connection', 'Statement'],
-                grep: ['HttpClient|RestTemplate|@FeignClient|getConnection|createStatement']
-            },
-            resource: {
-                lsp: ['ThreadPoolExecutor', 'ExecutorService', 'DataSource', 'PooledConnection'],
-                grep: ['newCachedThreadPool|newFixedThreadPool|DataSource|ConnectionPool']
-            },
-            backlog: {
-                lsp: ['BlockingQueue', 'LinkedBlockingQueue', 'Consumer', 'Subscriber'],
-                grep: ['BlockingQueue|@RabbitListener|@KafkaListener|@StreamListener']
-            },
-            gc: {
-                lsp: ['ArrayList', 'HashMap', 'StringBuilder', 'BigDecimal', 'Stream'],
-                grep: ['new ArrayList|new HashMap|new StringBuilder|new BigDecimal|\.stream\\(\\)']
-            }
+        const lspKeywords: Record<string, string[]> = {
+            memory: ['ThreadLocal', 'ConcurrentHashMap', 'HashMap', 'static Map'],
+            cpu: ['synchronized', 'ReentrantLock', 'Atomic', 'volatile'],
+            slow: ['HttpClient', 'RestTemplate', 'WebClient', '@Transactional'],
+            resource: ['ThreadPoolExecutor', 'DataSource', 'ConnectionPool'],
+            backlog: ['@KafkaListener', '@RabbitListener', 'BlockingQueue'],
+            gc: ['ArrayList', 'StringBuilder', 'BigDecimal', 'stream()']
         };
 
-        const searchPatterns = patterns[symptom] || { lsp: [], grep: [] };
-        const limitedLsp = searchPatterns.lsp.slice(0, maxPatterns);
-        const limitedGrep = searchPatterns.grep.slice(0, Math.ceil(maxPatterns / 2));
+        const keywords = lspKeywords[symptom]?.slice(0, maxPatterns) || [];
 
         return {
             content: [{
                 type: 'text' as const,
                 text: JSON.stringify({
                     success: true,
-                    query: { symptom, preferLsp, maxPatterns },
                     data: {
-                        recommendation: '⚠️ 必须使用 LSP (cclsp) 进行代码搜索，禁止直接 grep',
-                        lspSymbols: limitedLsp,
-                        grepPatterns: limitedGrep,
-                        instructions: [
-                            '1. 【强制】使用 mcp__cclsp__find_symbol({ query: "关键词" })',
-                            '2. 【强制】找到后用 mcp__cclsp__find_call_hierarchy 分析调用链',
-                            '3. 【禁止】直接使用 grep_search，除非 cclsp 明确失败',
-                            '4. 如必须用 grep，需说明 cclsp 失败原因'
-                        ]
+                        symptom,
+                        cclspKeywords: keywords,
+                        usage: 'mcp__cclsp__find_symbol({ query: "关键词" })',
+                        note: '禁止使用 grep/Search，必须使用 cclsp'
                     }
                 }, null, 2)
             }]
@@ -526,22 +500,21 @@ server.tool(
             };
         }
 
-        // 3. 搜索建议
+        // 3. 搜索建议（只返回 cclsp 关键词，不返回 grep）
         if (fields.includes('patterns')) {
-            const patterns: Record<string, { lsp: string[], grep: string[] }> = {
-                memory: { lsp: ['ThreadLocal', 'ConcurrentHashMap'], grep: ['static.*Map|ThreadLocal'] },
-                cpu: { lsp: ['synchronized', 'ReentrantLock'], grep: ['synchronized|ReentrantLock'] },
-                slow: { lsp: ['HttpClient', 'Connection'], grep: ['HttpClient|getConnection'] },
-                resource: { lsp: ['ThreadPoolExecutor', 'DataSource'], grep: ['newCachedThreadPool|DataSource'] },
-                backlog: { lsp: ['BlockingQueue', 'Consumer'], grep: ['@RabbitListener|@KafkaListener'] },
-                gc: { lsp: ['ArrayList', 'StringBuilder'], grep: ['new ArrayList|new StringBuilder'] }
+            const lspKeywords: Record<string, string[]> = {
+                memory: ['ThreadLocal', 'ConcurrentHashMap', 'static Map'],
+                cpu: ['synchronized', 'ReentrantLock', 'Atomic'],
+                slow: ['HttpClient', 'RestTemplate', '@Transactional'],
+                resource: ['ThreadPoolExecutor', 'DataSource', 'Executors'],
+                backlog: ['@KafkaListener', '@RabbitListener', 'BlockingQueue'],
+                gc: ['ArrayList', 'StringBuilder', 'stream()']
             };
 
-            result.searchPatterns = symptoms.map(s => ({
-                symptom: s,
-                lsp: patterns[s]?.lsp.slice(0, 3) || [],
-                grep: patterns[s]?.grep[0] || ''
-            }));
+            result.cclspSearch = {
+                note: '使用 mcp__cclsp__find_symbol 逐个搜索以下关键词',
+                keywords: symptoms.flatMap(s => lspKeywords[s] || []).slice(0, 5)
+            };
         }
 
         // 4. 反模式
