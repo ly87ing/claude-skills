@@ -30,7 +30,7 @@ export interface ChecklistItem {
 export const CHECKLIST_DATA: Record<string, ChecklistSection> = {
     '0': {
         id: '0',
-        title: '放大效应追踪',
+        title: '代码级放大效应',
         priority: 'P0',
         items: [
             { desc: '流量入口排查（Controller, MQ Listener, Schedule Job, WebSocket）', verify: 'arthas: trace *Controller *', threshold: 'QPS > 1000 关注', why: '入口是性能问题的放大器，1个入口的慢操作会被流量放大N倍' },
@@ -172,8 +172,7 @@ export const CHECKLIST_DATA: Record<string, ChecklistSection> = {
             { desc: '超时设置不当', verify: '检查 dubbo:reference timeout', fix: 'provider > consumer', why: 'consumer 超时短于 provider 导致重复请求' },
             { desc: '序列化开销', verify: '检查传输对象大小', threshold: '> 1MB 需优化', why: '大对象序列化耗 CPU，传输耗带宽' },
             { desc: '线程池满', verify: 'arthas: thread | grep dubbo', threshold: '活跃 > 80% 告警', why: '线程池满导致新请求被拒绝' },
-            { desc: '重试风暴', verify: '检查 retries 配置', fix: '幂等接口才重试', why: '非幂等接口重试导致数据重复' },
-            { desc: '熔断缺失', verify: '检查 Sentinel/Hystrix 配置', why: '无熔断时下游故障会拖垮上游' }
+            { desc: '重试风暴', verify: '检查 retries 配置', fix: '幂等接口才重试', why: '非幂等接口重试导致数据重复' }
         ]
     },
     '17': {
@@ -190,7 +189,7 @@ export const CHECKLIST_DATA: Record<string, ChecklistSection> = {
     },
     '18': {
         id: '18',
-        title: '放大效应进阶',
+        title: '架构级放大效应',
         priority: 'P0',
         items: [
             { desc: '惊群效应（缓存失效时 N 线程同时查库）', verify: '搜索 cache.get 后直接 db.query，无锁保护', fix: 'Mutex/Singleflight 或分布式锁', why: '1000 并发 x 缓存失效 = 1000 次 DB 查询，应该只允许 1 个线程查' },
@@ -198,7 +197,9 @@ export const CHECKLIST_DATA: Record<string, ChecklistSection> = {
             { desc: '排队放大（任务堆积导致等待时间 > 处理时间）', verify: 'arthas: thread 检查线程池队列大小', threshold: '队列 > 100 需关注', why: '处理 10ms 但排队 1s，用户感知是 1.01s' },
             { desc: '热点 Key 放大（分片不均导致单点压力）', verify: '检查 Redis/DB 分片 key 分布', fix: '加随机后缀分散', why: '100 万请求打到同一分片，该分片成为瓶颈' },
             { desc: '超时放大（超时配置过长占用资源）', verify: '搜索 timeout 配置 > 10s', fix: '超时 3-5s，快速失败', why: '超时 30s = 线程被占 30s，10 个慢请求耗尽线程池' },
-            { desc: '连接放大（每请求新建连接）', verify: '搜索 new HttpClient/new Connection', fix: '使用连接池', why: 'TCP 握手 + TLS 握手 = 100-500ms，连接池复用只需 1ms' }
+            { desc: '连接放大（每请求新建连接）', verify: '搜索 new HttpClient/new Connection', fix: '使用连接池', why: 'TCP 握手 + TLS 握手 = 100-500ms，连接池复用只需 1ms' },
+            { desc: '内存放大（可共享数据未共享）', verify: '搜索每请求 new 的大对象/集合', fix: '静态缓存/单例共享', why: '1000 并发 x 每请求 1MB = 1GB 内存，共享后只需 1MB' },
+            { desc: '序列化放大（同对象多次序列化）', verify: '检查 RPC/MQ 发送前是否重复序列化', fix: '序列化一次复用', why: '发送 10 个 MQ 序列化 10 次，应该序列化 1 次发 10 次' }
         ]
     },
     '19': {
