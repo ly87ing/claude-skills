@@ -28,10 +28,19 @@ description: Diagnoses Java performance issues including slow response, high CPU
 
 ## 分析流程
 
-### Step 1: 获取检查项（MCP 工具）
+### Step 1: 一站式诊断（推荐）
 
 > [!IMPORTANT]
-> **优先使用 MCP 工具**，避免直接读取文件浪费 Token。
+> **使用 `diagnose_all` 聚合工具**，一次调用获取所有信息，节省 50%+ Token。
+
+```
+mcp__java-perf__diagnose_all({
+  symptoms: ["cpu", "slow"],
+  priority: "P0",           // 只返回紧急项
+  fields: ["diagnosis", "checklist", "patterns"],
+  compact: true             // 精简模式
+})
+```
 
 **症状映射**：
 | 用户描述 | MCP 参数 |
@@ -43,18 +52,14 @@ description: Diagnoses Java performance issues including slow response, high CPU
 | 消息积压 | `backlog` |
 | GC频繁/STW | `gc` |
 
-**调用顺序**：
-1. `mcp__java-perf__get_diagnosis` - 单症状快速诊断
-2. `mcp__java-perf__get_combined_diagnosis` - 多症状组合诊断 ✨
-3. `mcp__java-perf__get_checklist` - 检查项
-4. `mcp__java-perf__search_code_patterns` - 搜索建议
-
 ---
 
 ### Step 2: 代码分析
 
 > [!CAUTION]
 > **优先尝试 LSP**，失败后使用 Grep（加 `head_limit: 50`）
+
+诊断工具返回的 `searchPatterns` 包含 LSP 和 Grep 建议。
 
 ---
 
@@ -65,8 +70,6 @@ description: Diagnoses Java performance issues including slow response, high CPU
 2. 量化数据：调用次数、放大倍数
 3. 可直接应用的修复代码
 
-**报告模板**：`mcp__java-perf__get_template()`
-
 ---
 
 ## 示例对话
@@ -76,22 +79,20 @@ description: Diagnoses Java performance issues including slow response, high CPU
 
 ### Claude 分析流程
 
-**1. 识别症状**：`slow` + `cpu`
-
-**2. 调用组合诊断**：
+**1. 一次调用获取全部诊断信息**：
 ```
-mcp__java-perf__get_combined_diagnosis(symptoms: ["cpu", "slow"])
+mcp__java-perf__diagnose_all({
+  symptoms: ["cpu", "slow"],
+  priority: "P0",
+  fields: ["diagnosis", "checklist", "patterns"]
+})
 ```
-→ 返回：锁竞争概率 60%，正则回溯 20%
 
-**3. 获取检查项**：
-```
-mcp__java-perf__get_checklist(symptoms: ["cpu", "slow"])
-```
-→ 返回：锁与并发、IO阻塞、外部调用等章节
+**返回内容**：
+- 组合诊断：锁竞争概率 60%
+- P0 检查项：锁与并发、IO阻塞、数据库
+- 搜索建议：`synchronized`, `HttpClient`
 
-**4. 代码搜索**：
-- 搜索 `synchronized`, `ReentrantLock`
-- 搜索 `HttpClient`, `RestTemplate`
+**2. 代码搜索**（基于返回的 patterns）
 
-**5. 输出报告**：按模板格式输出问题和修复方案
+**3. 输出报告**

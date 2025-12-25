@@ -416,6 +416,175 @@ server.tool(
     }
 );
 
+/**
+ * 工具 6: diagnose_all (聚合工具)
+ * 一站式诊断：合并诊断、检查项、搜索建议、反模式
+ * 相比分别调用可节省 50%+ Token
+ */
+server.tool(
+    'diagnose_all',
+    {
+        symptoms: z.array(z.enum(VALID_SYMPTOMS))
+            .min(1, '请至少提供一个症状')
+            .max(6, '症状数量不能超过6个')
+            .describe(`症状列表: ${Object.entries(SYMPTOM_DESCRIPTIONS).map(([k, v]) => `${k}(${v})`).join(', ')}`),
+
+        priority: z.enum(['all', 'P0', 'P1'])
+            .default('P0')
+            .describe('优先级过滤: P0(紧急,推荐), P1(重要), all(全部)'),
+
+        fields: z.array(z.enum(['diagnosis', 'checklist', 'patterns', 'antipatterns']))
+            .default(['diagnosis', 'checklist'])
+            .describe('返回字段: diagnosis(诊断), checklist(检查项), patterns(搜索建议), antipatterns(反模式)'),
+
+        compact: z.boolean()
+            .default(true)
+            .describe('紧凑模式: true=只返回必需字段, false=完整信息')
+    },
+    async ({ symptoms, priority, fields, compact }) => {
+        const result: Record<string, unknown> = {
+            symptoms,
+            priority
+        };
+
+        // 1. 诊断信息
+        if (fields.includes('diagnosis')) {
+            // 单症状或组合诊断
+            if (symptoms.length === 1) {
+                const symptom = symptoms[0];
+                const diag = QUICK_DIAGNOSIS[symptom];
+                result.diagnosis = compact ? {
+                    causes: diag?.causes.slice(0, 3),
+                    tools: diag?.tools.slice(0, 2)
+                } : diag;
+            } else {
+                // 多症状组合
+                const pairs = [];
+                for (let i = 0; i < symptoms.length; i++) {
+                    for (let j = i + 1; j < symptoms.length; j++) {
+                        const sorted = [symptoms[i], symptoms[j]].sort();
+                        const key = sorted.join('+');
+                        const combo = SYMPTOM_COMBINATIONS[key];
+                        if (combo) {
+                            pairs.push({
+                                combination: key,
+                                diagnosis: combo.diagnosis,
+                                topCause: combo.rootCauses[0]
+                            });
+                        }
+                    }
+                }
+                result.combinedDiagnosis = pairs;
+            }
+        }
+
+        // 2. 检查项
+        if (fields.includes('checklist')) {
+            const sectionIds = new Set<string>();
+            symptoms.forEach(s => {
+                (SYMPTOM_TO_SECTIONS[s] || []).forEach(id => sectionIds.add(id));
+            });
+
+            const checklist: Array<{
+                id: string;
+                title: string;
+                priority: string;
+                items: Array<{
+                    desc: string;
+                    verify?: string;
+                    fix?: string;
+                    why?: string;
+                }>;
+            }> = [];
+
+            for (const id of sectionIds) {
+                const section = CHECKLIST_DATA[id];
+                if (section) {
+                    // 优先级过滤
+                    if (priority !== 'all' && section.priority !== priority) {
+                        continue;
+                    }
+
+                    checklist.push({
+                        id: section.id,
+                        title: section.title,
+                        priority: section.priority,
+                        items: compact
+                            ? section.items.map(item => ({
+                                desc: item.desc,
+                                verify: item.verify,
+                                fix: item.fix
+                            }))
+                            : section.items
+                    });
+                }
+            }
+
+            // 按优先级排序
+            checklist.sort((a, b) => {
+                const order = { 'P0': 0, 'P1': 1, 'P2': 2 };
+                return (order[a.priority as keyof typeof order] || 99) - (order[b.priority as keyof typeof order] || 99);
+            });
+
+            result.checklist = checklist;
+            result.checklistSummary = {
+                sections: checklist.length,
+                items: checklist.reduce((sum, s) => sum + s.items.length, 0)
+            };
+        }
+
+        // 3. 搜索建议
+        if (fields.includes('patterns')) {
+            const patterns: Record<string, { lsp: string[], grep: string[] }> = {
+                memory: { lsp: ['ThreadLocal', 'ConcurrentHashMap'], grep: ['static.*Map|ThreadLocal'] },
+                cpu: { lsp: ['synchronized', 'ReentrantLock'], grep: ['synchronized|ReentrantLock'] },
+                slow: { lsp: ['HttpClient', 'Connection'], grep: ['HttpClient|getConnection'] },
+                resource: { lsp: ['ThreadPoolExecutor', 'DataSource'], grep: ['newCachedThreadPool|DataSource'] },
+                backlog: { lsp: ['BlockingQueue', 'Consumer'], grep: ['@RabbitListener|@KafkaListener'] },
+                gc: { lsp: ['ArrayList', 'StringBuilder'], grep: ['new ArrayList|new StringBuilder'] }
+            };
+
+            result.searchPatterns = symptoms.map(s => ({
+                symptom: s,
+                lsp: patterns[s]?.lsp.slice(0, 3) || [],
+                grep: patterns[s]?.grep[0] || ''
+            }));
+        }
+
+        // 4. 反模式
+        if (fields.includes('antipatterns')) {
+            const antiPatternMap: Record<string, string[]> = {
+                memory: ['循环创建对象', '无界队列'],
+                cpu: ['锁内IO'],
+                slow: ['锁内IO', 'N+1 查询'],
+                resource: ['无界队列'],
+                backlog: ['消息重复消费', '消费者阻塞'],
+                gc: ['循环创建对象', 'Stream 短集合']
+            };
+
+            const relevantNames = new Set<string>();
+            symptoms.forEach(s => {
+                (antiPatternMap[s] || []).forEach(name => relevantNames.add(name));
+            });
+
+            result.antiPatterns = ANTI_PATTERNS
+                .filter(p => relevantNames.has(p.name))
+                .map(p => compact ? { name: p.name, fix: p.good } : p);
+        }
+
+        return {
+            content: [{
+                type: 'text' as const,
+                text: JSON.stringify({
+                    success: true,
+                    tokenSaving: '相比分别调用节省 50%+ Token',
+                    data: result
+                }, null, 2)
+            }]
+        };
+    }
+);
+
 // ========== 启动服务器 ==========
 async function main() {
     const transport = new StdioServerTransport();
