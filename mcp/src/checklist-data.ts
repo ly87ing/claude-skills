@@ -2,156 +2,188 @@
  * Checklist 数据 - 根据症状返回相关检查项
  */
 
+// 详细检查项
+export interface DetailedItem {
+    desc: string;           // 检查项描述
+    verify?: string;        // 验证命令
+    threshold?: string;     // 告警阈值
+    fix?: string;           // 快速修复建议
+}
+
+// 章节定义
+export interface ChecklistSection {
+    id: string;
+    title: string;
+    priority: 'P0' | 'P1' | 'P2';  // P0=紧急, P1=重要, P2=改进
+    items: DetailedItem[];
+}
+
+// 向后兼容的简单接口
 export interface ChecklistItem {
     id: string;
     title: string;
     items: string[];
 }
 
-export const CHECKLIST_DATA: Record<string, ChecklistItem> = {
+export const CHECKLIST_DATA: Record<string, ChecklistSection> = {
     '0': {
         id: '0',
         title: '放大效应追踪',
+        priority: 'P0',
         items: [
-            '流量入口排查（Controller, MQ Listener, Schedule Job, WebSocket）',
-            '循环内 IO/计算（for/while/stream 内的 DB 查询、RPC、复杂计算）',
-            '集合笛卡尔积（嵌套循环 O(N*M)）',
-            '广播风暴（单事件触发全量推送）',
-            '频繁对象创建（循环内 new 对象、stream.collect）'
+            { desc: '流量入口排查（Controller, MQ Listener, Schedule Job, WebSocket）', verify: 'arthas: trace *Controller *', threshold: 'QPS > 1000 关注' },
+            { desc: '循环内 IO/计算（for/while/stream 内的 DB 查询、RPC）', verify: 'grep -n "for.*\\{" | 检查内部是否有 dao/rpc 调用', fix: '批量查询替代循环查询' },
+            { desc: '集合笛卡尔积（嵌套循环 O(N*M)）', verify: '搜索嵌套 for 循环', threshold: 'N*M > 10000 需优化' },
+            { desc: '广播风暴（单事件触发全量推送）', verify: '检查 @EventListener/@KafkaListener 处理逻辑' },
+            { desc: '频繁对象创建（循环内 new 对象）', verify: 'async-profiler -e alloc', fix: '对象池/复用' }
         ]
     },
     '1': {
         id: '1',
         title: '锁与并发',
+        priority: 'P0',
         items: [
-            '锁粒度过大（synchronized 方法或大代码块）',
-            '锁竞争（高频访问的共享资源）',
-            '死锁风险（嵌套锁获取顺序不一致）',
-            'CAS 自旋（Atomic 的 do-while 无退避）'
+            { desc: '锁粒度过大（synchronized 方法或大代码块）', verify: 'jstack | grep -A 20 "BLOCKED"', fix: '细化锁粒度/读写锁' },
+            { desc: '锁竞争（高频访问的共享资源）', verify: 'arthas: monitor -c 5 锁方法', threshold: '等待时间 > 100ms' },
+            { desc: '死锁风险（嵌套锁获取顺序不一致）', verify: 'jstack | grep "deadlock"' },
+            { desc: 'CAS 自旋（Atomic 的 do-while 无退避）', verify: '搜索 AtomicInteger/AtomicLong 使用处', fix: 'LongAdder 替代' }
         ]
     },
     '2': {
         id: '2',
         title: 'IO 与阻塞',
+        priority: 'P0',
         items: [
-            '同步 IO（NIO/Netty 线程中混入 JDBC/File IO/同步 HTTP）',
-            '长耗时逻辑（Controller 入口未异步化的耗时操作）',
-            '资源未关闭（InputStream/Connection 未在 finally 或 try-with-resources 关闭）'
+            { desc: '同步 IO（NIO/Netty 线程中混入阻塞操作）', verify: '检查 EventLoop 线程内是否有 JDBC/File IO' },
+            { desc: '长耗时逻辑（Controller 入口未异步化）', verify: 'arthas: trace 入口方法', threshold: '耗时 > 500ms 需异步' },
+            { desc: '资源未关闭（InputStream/Connection 未 close）', verify: 'lsof -p PID | wc -l', threshold: '句柄 > 10000 告警', fix: 'try-with-resources' }
         ]
     },
     '3': {
         id: '3',
         title: '外部调用',
+        priority: 'P1',
         items: [
-            '无超时设置（HTTPClient, Dubbo, DB 连接）',
-            '重试风暴（无 Backoff 和 Jitter）',
-            '同步串行调用（多下游串行，可改 CompletableFuture 并行）'
+            { desc: '无超时设置（HTTPClient, Dubbo, DB 连接）', verify: '搜索 timeout/connectTimeout 配置', fix: '统一配置超时 3-5s' },
+            { desc: '重试风暴（无 Backoff 和 Jitter）', verify: '检查 @Retry/@Retryable 配置' },
+            { desc: '同步串行调用（多下游串行）', verify: 'arthas: trace 检查调用链', fix: 'CompletableFuture 并行' }
         ]
     },
     '4': {
         id: '4',
         title: '资源池管理',
+        priority: 'P0',
         items: [
-            '无界线程池（Executors.newCachedThreadPool）',
-            '池资源泄露（获取后未归还）',
-            '连接数配置不当（过小等待/过大切换）'
+            { desc: '无界线程池（Executors.newCachedThreadPool）', verify: 'arthas: thread -n 10', threshold: '线程 > 200 告警', fix: 'ThreadPoolExecutor 有界' },
+            { desc: '池资源泄露（获取后未归还）', verify: 'jstack | grep pool', fix: 'finally 归还' },
+            { desc: '连接数配置不当', verify: 'show processlist (MySQL)', threshold: '活跃连接 > 80% 池大小' }
         ]
     },
     '5': {
         id: '5',
         title: '内存与缓存',
+        priority: 'P0',
         items: [
-            '无界缓存（static Map 无 TTL/Size 限制，只增不删）',
-            '大对象分配（一次性加载大文件/全量表）',
-            'ThreadLocal 泄露（请求结束未 remove()）'
+            { desc: '无界缓存（static Map 无 TTL/Size 限制）', verify: 'jmap -histo:live | head -20', fix: 'Caffeine/Guava Cache' },
+            { desc: '大对象分配（一次性加载大文件/全量表）', verify: 'MAT 分析 Dominator Tree', threshold: '单对象 > 10MB 关注' },
+            { desc: 'ThreadLocal 泄露（请求结束未 remove）', verify: '搜索 ThreadLocal 未配对 remove()', fix: 'finally 中 remove()' }
         ]
     },
     '6': {
         id: '6',
         title: '异常处理',
+        priority: 'P2',
         items: [
-            '异常吞没（catch 后仅打印，未抛出/处理）',
-            '异常日志爆炸（高频错误路径打印完整堆栈）',
-            '异常控制流程（用异常做正常业务流程控制）'
+            { desc: '异常吞没（catch 后仅打印）', verify: '搜索 catch.*\\{.*e.printStackTrace' },
+            { desc: '异常日志爆炸（高频打印完整堆栈）', verify: '日志文件大小增长速率', threshold: '日志 > 1GB/天 关注' },
+            { desc: '异常控制流程（用异常做业务控制）', verify: '搜索 catch 中的业务逻辑' }
         ]
     },
     '10': {
         id: '10',
         title: '正则表达式',
+        priority: 'P1',
         items: [
-            'Catastrophic Backtracking（嵌套量词 (a+)+ 指数回溯）',
-            '反复编译（Pattern.compile 在循环/高频方法中被反复调用）'
+            { desc: 'Catastrophic Backtracking（嵌套量词如 (a+)+）', verify: '搜索 Pattern.compile，检查正则复杂度' },
+            { desc: '反复编译（循环内 Pattern.compile）', verify: '搜索 Pattern.compile 出现位置', fix: '静态常量预编译' }
         ]
     },
     '11': {
         id: '11',
         title: '响应式编程',
+        priority: 'P1',
         items: [
-            '阻塞操作（map/flatMap 中有 JDBC/RPC 阻塞）',
-            '背压丢失（无法处理背压的操作符）'
+            { desc: '阻塞操作（Mono/Flux 中有阻塞调用）', verify: '搜索 .block()/.toFuture().get()', fix: 'subscribeOn(Schedulers.boundedElastic())' },
+            { desc: '背压丢失（无法处理背压的操作符）', verify: '检查 onBackpressure 策略' }
         ]
     },
     '12': {
         id: '12',
         title: '定时任务',
+        priority: 'P1',
         items: [
-            '任务堆积（执行时间超过调度间隔）',
-            '异常中断（未捕获异常导致调度停止）'
+            { desc: '任务堆积（执行时间超过调度间隔）', verify: '日志检查任务开始/结束时间', threshold: '执行时间 > 间隔时间' },
+            { desc: '异常中断（未捕获异常导致调度停止）', verify: '检查 @Scheduled 方法的异常处理', fix: 'try-catch 包裹' }
         ]
     },
     '13': {
         id: '13',
         title: '数据库',
+        priority: 'P0',
         items: [
-            'N+1 查询（循环内单条查询，应批量 IN 查询）',
-            '全表扫描（无索引或索引失效）',
-            '深度分页（OFFSET 过大，应改用游标分页）',
-            '事务过长（事务内包含 RPC/文件操作）',
-            '锁表操作（DDL/大批量 UPDATE 未分批）'
+            { desc: 'N+1 查询（循环内单条查询）', verify: '开启 SQL 日志，观察重复 SQL', fix: 'IN 批量查询' },
+            { desc: '全表扫描（无索引或索引失效）', verify: 'EXPLAIN SELECT ...', threshold: 'type=ALL 需优化' },
+            { desc: '深度分页（OFFSET 过大）', verify: '搜索 LIMIT.*OFFSET', fix: 'WHERE id > lastId' },
+            { desc: '事务过长（事务内包含 RPC）', verify: '检查 @Transactional 方法内容', fix: '事务拆分' },
+            { desc: '锁表操作（大批量 UPDATE）', verify: 'show processlist', fix: '分批处理' }
         ]
     },
     '14': {
         id: '14',
         title: 'Java 特定',
+        priority: 'P2',
         items: [
-            'Stream 滥用（短集合用 Stream 增加开销）',
-            'BigDecimal 重复创建（应用 BigDecimal.ZERO/ONE 常量）',
-            '字符串拼接（循环内 + 拼接，应用 StringBuilder）',
-            '反射调用（高频路径使用反射未缓存 Method）',
-            '装箱拆箱（Integer/Long 频繁自动装箱）'
+            { desc: 'Stream 滥用（短集合用 Stream）', verify: 'async-profiler 热点分析', threshold: '集合 < 10 用 for', fix: 'for 循环替代' },
+            { desc: 'BigDecimal 重复创建', verify: '搜索 new BigDecimal', fix: 'BigDecimal.ZERO/ONE' },
+            { desc: '字符串拼接（循环内 + 拼接）', verify: '搜索循环内字符串 +', fix: 'StringBuilder' },
+            { desc: '反射调用（高频路径未缓存 Method）', verify: '搜索 getMethod/invoke', fix: '缓存 Method 对象' },
+            { desc: '装箱拆箱（Integer/Long 频繁自动装箱）', verify: 'async-profiler -e alloc', fix: '原始类型' }
         ]
     },
     '15': {
         id: '15',
         title: 'Spring 框架',
+        priority: 'P1',
         items: [
-            '@Async 默认线程池（未配置自定义线程池导致任务堆积）',
-            '@Transactional 传播问题（嵌套事务配置不当）',
-            'AOP 代理失效（同类方法调用绕过代理）',
-            'Bean 循环依赖（延迟初始化导致启动慢）',
-            '@Scheduled 单线程（默认单线程导致任务阻塞）'
+            { desc: '@Async 默认线程池', verify: '检查 TaskExecutor 配置', fix: '自定义 ThreadPoolTaskExecutor' },
+            { desc: '@Transactional 传播问题', verify: '检查嵌套事务配置' },
+            { desc: 'AOP 代理失效（同类方法调用）', verify: '检查 this.method() 调用', fix: 'AopContext.currentProxy()' },
+            { desc: 'Bean 循环依赖', verify: '启动日志检查 circular reference', fix: '@Lazy 注解' },
+            { desc: '@Scheduled 单线程', verify: '检查 SchedulingConfigurer', fix: '配置线程池' }
         ]
     },
     '16': {
         id: '16',
         title: 'Dubbo/RPC',
+        priority: 'P1',
         items: [
-            '超时设置不当（provider/consumer 超时配置冲突）',
-            '序列化开销（复杂对象未优化序列化）',
-            '线程池满（provider 线程池配置过小）',
-            '重试风暴（未配置合理重试策略）',
-            '熔断缺失（未使用 Sentinel/Hystrix 限流）'
+            { desc: '超时设置不当', verify: '检查 dubbo:reference timeout', fix: 'provider > consumer' },
+            { desc: '序列化开销', verify: '检查传输对象大小', threshold: '> 1MB 需优化' },
+            { desc: '线程池满', verify: 'arthas: thread | grep dubbo', threshold: '活跃 > 80% 告警' },
+            { desc: '重试风暴', verify: '检查 retries 配置', fix: '幂等接口才重试' },
+            { desc: '熔断缺失', verify: '检查 Sentinel/Hystrix 配置' }
         ]
     },
     '17': {
         id: '17',
         title: 'MyBatis/ORM',
+        priority: 'P1',
         items: [
-            '一级缓存坑（同 SqlSession 内脏读）',
-            '懒加载 N+1（关联查询触发多次 SQL）',
-            '批量插入未优化（逐条 insert 应改 batch）',
-            '动态 SQL 拼接（foreach 过长导致 SQL 爆炸）',
-            'ResultMap 映射开销（复杂嵌套映射性能差）'
+            { desc: '一级缓存坑（同 SqlSession 内脏读）', verify: '检查事务边界' },
+            { desc: '懒加载 N+1', verify: '开启 SQL 日志', fix: 'fetchType=eager 或 JOIN' },
+            { desc: '批量插入未优化', verify: '搜索循环 insert', fix: 'foreach batch 插入' },
+            { desc: '动态 SQL 过长', verify: '检查 foreach 元素数量', threshold: '> 1000 需分批' },
+            { desc: 'ResultMap 映射开销', verify: '检查复杂嵌套映射' }
         ]
     }
 };

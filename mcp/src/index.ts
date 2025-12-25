@@ -50,11 +50,15 @@ server.tool(
             .max(6, '症状数量不能超过6个')
             .describe(`症状列表。可选值: ${Object.entries(SYMPTOM_DESCRIPTIONS).map(([k, v]) => `${k}(${v})`).join(', ')}`),
 
-        includeItems: z.boolean()
+        includeDetails: z.boolean()
             .default(true)
-            .describe('是否返回详细检查项，默认 true')
+            .describe('是否返回详细信息（验证命令、阈值等），默认 true'),
+
+        priorityFilter: z.enum(['all', 'P0', 'P1', 'P2'])
+            .default('all')
+            .describe('按优先级过滤: all(全部), P0(紧急), P1(重要), P2(改进)')
     },
-    async ({ symptoms, includeItems }) => {
+    async ({ symptoms, includeDetails, priorityFilter }) => {
         // 收集相关章节
         const sectionIds = new Set<string>();
         for (const symptom of symptoms) {
@@ -66,31 +70,54 @@ server.tool(
         const checklist: Array<{
             id: string;
             title: string;
+            priority: string;
             itemCount: number;
-            items?: string[];
+            items?: Array<{
+                desc: string;
+                verify?: string;
+                threshold?: string;
+                fix?: string;
+            }>;
         }> = [];
 
         for (const id of sectionIds) {
             const section = CHECKLIST_DATA[id];
             if (section) {
+                // 优先级过滤
+                if (priorityFilter !== 'all' && section.priority !== priorityFilter) {
+                    continue;
+                }
+
                 checklist.push({
                     id: section.id,
                     title: section.title,
+                    priority: section.priority,
                     itemCount: section.items.length,
-                    ...(includeItems ? { items: section.items } : {})
+                    ...(includeDetails ? { items: section.items } : {})
                 });
             }
         }
+
+        // 按优先级排序: P0 > P1 > P2
+        checklist.sort((a, b) => {
+            const order = { 'P0': 0, 'P1': 1, 'P2': 2 };
+            return (order[a.priority as keyof typeof order] || 99) - (order[b.priority as keyof typeof order] || 99);
+        });
 
         return {
             content: [{
                 type: 'text' as const,
                 text: JSON.stringify({
                     success: true,
-                    query: { symptoms, includeItems },
+                    query: { symptoms, includeDetails, priorityFilter },
                     data: {
                         sectionCount: checklist.length,
                         totalItems: checklist.reduce((sum, s) => sum + s.itemCount, 0),
+                        prioritySummary: {
+                            P0: checklist.filter(c => c.priority === 'P0').length,
+                            P1: checklist.filter(c => c.priority === 'P1').length,
+                            P2: checklist.filter(c => c.priority === 'P2').length
+                        },
                         checklist
                     }
                 }, null, 2)
