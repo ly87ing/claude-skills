@@ -172,41 +172,105 @@ export function analyzeLog(filePath: string, maxLines: number = 50000): LogAnaly
     // 按频率排序
     anomalies.sort((a, b) => b.rate - a.rate);
 
-    // ===== 错误提取 =====
-    const errors = lines
-        .filter(line => /Exception|ERROR|FATAL|Caused by/i.test(line))
-        .slice(0, 30);  // 最多 30 条错误
+    // ===== 异常指纹归类 =====
+    interface ExceptionFingerprint {
+        type: string;           // Exception 类型
+        location: string;       // 位置 (Class.method)
+        fingerprint: string;    // 指纹
+        count: number;          // 出现次数
+        example: string;        // 原始示例
+    }
+
+    const exceptionMap = new Map<string, ExceptionFingerprint>();
+
+    // 提取异常指纹
+    const exceptionRegex = /(\w+Exception|\w+Error)\s*(:|at\s+)?\s*([^\n]*)/gi;
+    let exMatch;
+
+    while ((exMatch = exceptionRegex.exec(content)) !== null) {
+        const exType = exMatch[1];
+        const context = exMatch[3] || '';
+
+        // 提取位置（如 com.xxx.UserSvc.login）
+        const locationMatch = context.match(/(\w+\.)+\w+/);
+        const location = locationMatch ? locationMatch[0].split('.').slice(-2).join('.') : 'Unknown';
+
+        // 生成指纹（类型 + 位置）
+        const fingerprint = `${exType}@${location}`;
+
+        if (!exceptionMap.has(fingerprint)) {
+            exceptionMap.set(fingerprint, {
+                type: exType,
+                location,
+                fingerprint,
+                count: 0,
+                example: exMatch[0].substring(0, 150)
+            });
+        }
+        exceptionMap.get(fingerprint)!.count++;
+    }
+
+    // 转为数组并排序
+    const exceptionFingerprints = Array.from(exceptionMap.values())
+        .sort((a, b) => b.count - a.count);
 
     // ===== 生成摘要 =====
     let summary = `### 日志分析: ${path.basename(filePath)}\n\n`;
+    summary += `**统计**: ${lines.length.toLocaleString()} 行, ${exceptionFingerprints.length} 类异常\n\n`;
 
+    // 异常指纹归类输出
+    if (exceptionFingerprints.length > 0) {
+        // 区分高频噪音 vs 低频关键
+        const totalExceptions = exceptionFingerprints.reduce((s, e) => s + e.count, 0);
+
+        summary += `## 🔬 异常指纹归类 (共 ${totalExceptions.toLocaleString()} 次)\n\n`;
+        summary += `| # | 类型 | 位置 | 次数 | 标记 |\n`;
+        summary += `|---|------|------|------|------|\n`;
+
+        exceptionFingerprints.slice(0, 10).forEach((e, i) => {
+            // 判断标记：次数 > 1000 是噪音，< 10 是关键
+            let tag = '';
+            if (e.count > 1000) {
+                tag = '🔥 核心噪音';
+            } else if (e.count < 10) {
+                tag = '⚠️ 可能根因';
+            } else if (e.count < 100) {
+                tag = '🔍 需关注';
+            }
+
+            summary += `| ${i + 1} | \`${e.type}\` | ${e.location} | ${e.count.toLocaleString()} | ${tag} |\n`;
+        });
+        summary += '\n';
+
+        // 关键发现提示
+        const keyErrors = exceptionFingerprints.filter(e => e.count < 10);
+        if (keyErrors.length > 0) {
+            summary += `> [!IMPORTANT]\n`;
+            summary += `> 发现 ${keyErrors.length} 个低频异常，可能是根因！\n\n`;
+        }
+    }
+
+    // 高频日志异常（死循环/风暴）
     if (anomalies.length > 0) {
-        summary += `🚨 **高频日志异常 (疑似死循环/风暴):**\n`;
-        anomalies.slice(0, 5).forEach((a, i) => {
-            summary += `${i + 1}. [${a.rate}/s, ${a.count}次] ${a.example.substring(0, 80)}...\n`;
+        summary += `## 🚨 高频日志风暴\n\n`;
+        anomalies.slice(0, 3).forEach((a, i) => {
+            summary += `${i + 1}. **${a.rate}/s** (${a.count.toLocaleString()}次) ${a.example.substring(0, 60)}...\n`;
         });
         summary += '\n';
     }
 
-    if (errors.length > 0) {
-        summary += `❌ **错误日志 (Top ${Math.min(errors.length, 10)}):**\n`;
-        errors.slice(0, 10).forEach((e, i) => {
-            summary += `${i + 1}. ${e.substring(0, 100)}...\n`;
-        });
-        summary += '\n';
-    }
-
+    // 代码坐标
     if (coordinates.length > 0) {
-        summary += `📍 **代码坐标 (来自堆栈):**\n`;
+        summary += `## 📍 代码坐标 (来自堆栈)\n\n`;
         coordinates.slice(0, 5).forEach(c => {
-            summary += `- ${c.file}:${c.line}\n`;
+            summary += `- \`${c.file}:${c.line}\`\n`;
         });
     }
 
     return {
         summary,
         anomalies: anomalies.slice(0, 10),
-        errors,
+        errors: exceptionFingerprints.slice(0, 20).map(e => e.example),
         coordinates
     };
 }
