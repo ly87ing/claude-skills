@@ -240,6 +240,7 @@ dependencies = [
  "chrono",
  "clap",
  "memchr",
+ "once_cell",
  "regex",
  "serde",
  "serde_json",

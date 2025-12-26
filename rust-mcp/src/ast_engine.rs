@@ -1,11 +1,92 @@
-//! AST Engine - Tree-sitter Java 分析
-//! 
+//! AST Engine - 高性能正则分析 + 注释过滤
+//!
 //! 🛰️ 雷达扫描：检测性能反模式
+//!
+//! 优化点：
+//! 1. 使用 once_cell 静态编译正则，避免重复创建
+//! 2. 过滤注释内容，避免误报
+//! 3. 新增响应式编程问题检测
 
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde_json::{json, Value};
 use std::path::Path;
 use walkdir::WalkDir;
-use regex::Regex;
+
+// ============================================================================
+// 静态编译正则表达式（只编译一次，全局复用）
+// ============================================================================
+
+/// 注释匹配正则（用于过滤）
+static COMMENT_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"//.*$|/\*[\s\S]*?\*/").unwrap()
+});
+
+// P0 严重规则
+static RE_N_PLUS_ONE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)for\s*\([^)]+\)\s*\{[^}]*(dao|repository|mapper|jdbc|select|insert|update|delete|http|client)[^}]*\}").unwrap()
+});
+static RE_NESTED_LOOP: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"for\s*\([^)]+\)\s*\{[^}]*for\s*\([^)]+\)").unwrap()
+});
+static RE_SYNC_METHOD: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"public\s+synchronized\s+\w+\s+\w+\s*\(").unwrap()
+});
+static RE_THREADLOCAL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"ThreadLocal\s*<").unwrap()
+});
+static RE_UNBOUNDED_POOL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"Executors\s*\.\s*(newCachedThreadPool|newScheduledThreadPool|newSingleThreadExecutor)").unwrap()
+});
+static RE_UNBOUNDED_CACHE_MAP: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"static\s+.*Map\s*<[^>]+>\s*\w+\s*=\s*new").unwrap()
+});
+static RE_UNBOUNDED_CACHE_LIST: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"static\s+.*(List|Set)\s*<[^>]+>\s*\w+\s*=\s*new").unwrap()
+});
+static RE_EXCEPTION_IGNORE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"catch\s*\([^)]+\)\s*\{\s*\}").unwrap()
+});
+
+// P1 警告规则
+static RE_OBJECT_IN_LOOP: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"for\s*\([^)]+\)\s*\{[^}]*new\s+\w+\s*\(").unwrap()
+});
+static RE_SYNC_BLOCK: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"synchronized\s*\([^)]+\)\s*\{").unwrap()
+});
+static RE_ATOMIC_SPIN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(AtomicInteger|AtomicLong)\s*[<\s]").unwrap()
+});
+static RE_NO_TIMEOUT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(HttpClient|RestTemplate|OkHttp|WebClient)\s*\.").unwrap()
+});
+static RE_BLOCKING_IO: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"new\s+File(Input|Output)Stream").unwrap()
+});
+static RE_STRING_CONCAT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"for\s*\([^)]+\)\s*\{[^}]*\+=").unwrap()
+});
+static RE_EXCEPTION_SWALLOW: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"catch\s*\([^)]+\)\s*\{[^}]*\.print").unwrap()
+});
+
+// 响应式编程问题 (来自 MMS 报告)
+static RE_EMITTER_UNBOUNDED: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"EmitterProcessor\s*\.\s*create\s*\(\s*\)").unwrap()
+});
+static RE_SINKS_NO_BACKPRESSURE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"Sinks\s*\.\s*many\s*\(\s*\)").unwrap()
+});
+
+// 缓存配置问题
+static RE_CACHE_NO_EXPIRE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(Caffeine|CacheBuilder)\s*\.\s*newBuilder").unwrap()
+});
+
+// ============================================================================
+// 规则定义
+// ============================================================================
 
 /// 问题严重级别
 #[derive(Debug, Clone, Copy)]
@@ -24,13 +105,49 @@ pub struct AstIssue {
     pub description: String,
 }
 
+/// 规则配置
+struct Rule {
+    id: &'static str,
+    description: &'static str,
+    severity: Severity,
+    regex: &'static Lazy<Regex>,
+}
+
+/// 所有规则（引用静态编译的正则）
+fn get_rules() -> Vec<Rule> {
+    vec![
+        // P0 严重
+        Rule { id: "N_PLUS_ONE", description: "循环内 IO/数据库调用", severity: Severity::P0, regex: &RE_N_PLUS_ONE },
+        Rule { id: "NESTED_LOOP", description: "嵌套循环 O(N*M)", severity: Severity::P0, regex: &RE_NESTED_LOOP },
+        Rule { id: "SYNC_METHOD", description: "synchronized 方法级锁", severity: Severity::P0, regex: &RE_SYNC_METHOD },
+        Rule { id: "UNBOUNDED_POOL", description: "无界线程池 Executors", severity: Severity::P0, regex: &RE_UNBOUNDED_POOL },
+        Rule { id: "UNBOUNDED_CACHE", description: "无界缓存 static Map", severity: Severity::P0, regex: &RE_UNBOUNDED_CACHE_MAP },
+        Rule { id: "UNBOUNDED_LIST", description: "无界缓存 static List/Set", severity: Severity::P0, regex: &RE_UNBOUNDED_CACHE_LIST },
+        Rule { id: "EXCEPTION_IGNORE", description: "空 catch 块", severity: Severity::P0, regex: &RE_EXCEPTION_IGNORE },
+        Rule { id: "EMITTER_UNBOUNDED", description: "EmitterProcessor 无界 (背压问题)", severity: Severity::P0, regex: &RE_EMITTER_UNBOUNDED },
+        // P1 警告
+        Rule { id: "OBJECT_IN_LOOP", description: "循环内创建对象", severity: Severity::P1, regex: &RE_OBJECT_IN_LOOP },
+        Rule { id: "SYNC_BLOCK", description: "synchronized 代码块", severity: Severity::P1, regex: &RE_SYNC_BLOCK },
+        Rule { id: "ATOMIC_SPIN", description: "Atomic 自旋 (考虑 LongAdder)", severity: Severity::P1, regex: &RE_ATOMIC_SPIN },
+        Rule { id: "NO_TIMEOUT", description: "HTTP 客户端可能无超时", severity: Severity::P1, regex: &RE_NO_TIMEOUT },
+        Rule { id: "BLOCKING_IO", description: "同步文件 IO", severity: Severity::P1, regex: &RE_BLOCKING_IO },
+        Rule { id: "STRING_CONCAT", description: "循环内字符串拼接", severity: Severity::P1, regex: &RE_STRING_CONCAT },
+        Rule { id: "EXCEPTION_SWALLOW", description: "异常被吞没 (仅打印)", severity: Severity::P1, regex: &RE_EXCEPTION_SWALLOW },
+        Rule { id: "SINKS_NO_BACKPRESSURE", description: "Sinks.many() 无背压处理", severity: Severity::P1, regex: &RE_SINKS_NO_BACKPRESSURE },
+        Rule { id: "CACHE_NO_EXPIRE", description: "Cache 可能无过期配置", severity: Severity::P1, regex: &RE_CACHE_NO_EXPIRE },
+    ]
+}
+
+// ============================================================================
+// 核心扫描函数
+// ============================================================================
+
 /// 全项目雷达扫描
 pub fn radar_scan(code_path: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let path = Path::new(code_path);
     let mut issues: Vec<AstIssue> = Vec::new();
     let mut file_count = 0;
-    
-    // 遍历所有 Java 文件
+
     for entry in WalkDir::new(path)
         .follow_links(true)
         .into_iter()
@@ -39,8 +156,7 @@ pub fn radar_scan(code_path: &str) -> Result<Value, Box<dyn std::error::Error>> 
         let file_path = entry.path();
         if file_path.extension().map_or(false, |ext| ext == "java") {
             file_count += 1;
-            
-            // 读取文件内容
+
             if let Ok(content) = std::fs::read_to_string(file_path) {
                 let file_name = file_path.to_string_lossy().to_string();
                 let file_issues = analyze_java_code(&content, &file_name);
@@ -48,18 +164,17 @@ pub fn radar_scan(code_path: &str) -> Result<Value, Box<dyn std::error::Error>> 
             }
         }
     }
-    
-    // 生成报告
+
     let p0_count = issues.iter().filter(|i| matches!(i.severity, Severity::P0)).count();
     let p1_count = issues.iter().filter(|i| matches!(i.severity, Severity::P1)).count();
-    
+
     let mut report = format!(
         "## 🛰️ 雷达扫描结果\n\n\
         **扫描**: {} 个 Java 文件\n\
         **发现**: {} 个嫌疑点 (P0: {}, P1: {})\n\n",
         file_count, issues.len(), p0_count, p1_count
     );
-    
+
     if p0_count > 0 {
         report.push_str("### 🔴 P0 严重嫌疑\n\n");
         for issue in issues.iter().filter(|i| matches!(i.severity, Severity::P0)) {
@@ -70,26 +185,26 @@ pub fn radar_scan(code_path: &str) -> Result<Value, Box<dyn std::error::Error>> 
         }
         report.push('\n');
     }
-    
+
     if p1_count > 0 {
         report.push_str("### 🟡 P1 警告\n\n");
-        for issue in issues.iter().filter(|i| matches!(i.severity, Severity::P1)).take(10) {
+        for issue in issues.iter().filter(|i| matches!(i.severity, Severity::P1)).take(20) {
             report.push_str(&format!(
                 "- **{}** - `{}:{}` - {}\n",
                 issue.issue_type, issue.file, issue.line, issue.description
             ));
         }
     }
-    
+
     Ok(json!(report))
 }
 
 /// 单文件扫描
 pub fn scan_source_code(code: &str, file_path: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let issues = analyze_java_code(code, file_path);
-    
+
     let mut report = format!("## 🛰️ 扫描: {}\n\n", file_path);
-    
+
     if issues.is_empty() {
         report.push_str("✅ 未发现明显性能问题\n");
     } else {
@@ -104,87 +219,85 @@ pub fn scan_source_code(code: &str, file_path: &str) -> Result<Value, Box<dyn st
             ));
         }
     }
-    
+
     Ok(json!(report))
 }
 
-/// 分析 Java 代码（基于正则模式匹配）
+/// 分析 Java 代码（高性能版本）
+///
+/// 优化：
+/// 1. 正则表达式已静态编译，不会重复创建
+/// 2. 过滤注释内容，避免误报
+/// 3. 去重逻辑
 fn analyze_java_code(code: &str, file_path: &str) -> Vec<AstIssue> {
     let mut issues = Vec::new();
-    let lines: Vec<&str> = code.lines().collect();
     let file_name = Path::new(file_path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| file_path.to_string());
-    
-    // 检测模式 - 来自 checklist-data.ts
-    let patterns: Vec<(&str, &str, Severity, &str)> = vec![
-        // P0 - 代码级放大效应
-        ("N_PLUS_ONE", "循环内 IO/计算", Severity::P0, 
-         r"(?i)for\s*\([^)]+\)\s*\{[^}]*(dao|repository|mapper|jdbc|select|insert|update|delete|http|client)[^}]*\}"),
-        ("NESTED_LOOP", "嵌套循环 O(N*M)", Severity::P0,
-         r"for\s*\([^)]+\)\s*\{[^}]*for\s*\([^)]+\)"),
-        ("OBJECT_IN_LOOP", "循环内创建对象", Severity::P1,
-         r"for\s*\([^)]+\)\s*\{[^}]*new\s+\w+\s*\("),
-        
-        // P0 - 锁与并发
-        ("SYNC_METHOD", "synchronized 方法级锁", Severity::P0,
-         r"synchronized\s+(public|private|protected)"),
-        ("SYNC_BLOCK_LARGE", "synchronized 大代码块", Severity::P1,
-         r"synchronized\s*\([^)]+\)\s*\{"),
-        ("ATOMIC_SPIN", "Atomic 自旋", Severity::P1,
-         r"(AtomicInteger|AtomicLong|AtomicReference)\s*[<\s]"),
-        
-        // P0 - 资源管理
-        ("THREADLOCAL_LEAK", "ThreadLocal 未 remove", Severity::P0,
-         r"ThreadLocal\s*<"),
-        ("UNBOUNDED_POOL", "无界线程池", Severity::P0,
-         r"Executors\s*\.\s*(newCachedThreadPool|newScheduledThreadPool|newSingleThreadExecutor)"),
-        ("UNBOUNDED_CACHE", "无界缓存 static Map", Severity::P0,
-         r"static\s+.*Map\s*<[^>]+>\s*\w+\s*=\s*new"),
-        
-        // P1 - IO/阻塞
-        ("NO_TIMEOUT", "可能无超时", Severity::P1,
-         r"(HttpClient|RestTemplate|OkHttp|WebClient)\s*[.\s]"),
-        ("BLOCKING_IO", "同步文件 IO", Severity::P1,
-         r"new\s+File(Input|Output)Stream"),
-        
-        // P2 - 异常处理
-        ("EXCEPTION_SWALLOW", "异常被吞没", Severity::P1,
-         r"catch\s*\([^)]+\)\s*\{\s*(//|/\*|\}|e\.print)"),
-        ("EXCEPTION_IGNORE", "空 catch 块", Severity::P0,
-         r"catch\s*\([^)]+\)\s*\{\s*\}"),
-        
-        // P1 - 字符串
-        ("STRING_CONCAT_LOOP", "循环内字符串拼接", Severity::P1,
-         r"for\s*\([^)]+\)\s*\{.*\+=.*String"),
-    ];
-    
-    // 编译正则并匹配
-    for (issue_type, desc, severity, pattern) in &patterns {
-        if let Ok(regex) = Regex::new(pattern) {
-            if regex.is_match(code) {
-                if let Some(mat) = regex.find(code) {
-                    let line_num = code[..mat.start()].matches('\n').count() + 1;
-                    
-                    // 去重
-                    let exists = issues.iter().any(|i: &AstIssue| 
-                        i.issue_type == *issue_type && i.line == line_num
-                    );
-                    
-                    if !exists {
-                        issues.push(AstIssue {
-                            severity: *severity,
-                            issue_type: issue_type.to_string(),
-                            file: file_name.clone(),
-                            line: line_num,
-                            description: desc.to_string(),
-                        });
-                    }
+
+    // 1. 移除注释，避免误报
+    let code_without_comments = COMMENT_REGEX.replace_all(code, "");
+
+    // 2. 特殊检测：ThreadLocal 必须有 remove()
+    if RE_THREADLOCAL.is_match(&code_without_comments) {
+        if !code_without_comments.contains(".remove()") {
+            if let Some(mat) = RE_THREADLOCAL.find(&code_without_comments) {
+                let line_num = code_without_comments[..mat.start()].matches('\n').count() + 1;
+                issues.push(AstIssue {
+                    severity: Severity::P0,
+                    issue_type: "THREADLOCAL_LEAK".to_string(),
+                    file: file_name.clone(),
+                    line: line_num,
+                    description: "ThreadLocal 未调用 remove()，线程池复用会导致内存泄露".to_string(),
+                });
+            }
+        }
+    }
+
+    // 3. 特殊检测：Cache 需要 expire 配置
+    if RE_CACHE_NO_EXPIRE.is_match(&code_without_comments) {
+        if !code_without_comments.contains("expire") && !code_without_comments.contains("maximumSize") {
+            if let Some(mat) = RE_CACHE_NO_EXPIRE.find(&code_without_comments) {
+                let line_num = code_without_comments[..mat.start()].matches('\n').count() + 1;
+                issues.push(AstIssue {
+                    severity: Severity::P1,
+                    issue_type: "CACHE_NO_EXPIRE".to_string(),
+                    file: file_name.clone(),
+                    line: line_num,
+                    description: "Caffeine/Guava Cache 未设置 expire 或 maximumSize".to_string(),
+                });
+            }
+        }
+    }
+
+    // 4. 使用静态编译的正则进行匹配
+    let rules = get_rules();
+    for rule in &rules {
+        // 跳过已特殊处理的规则
+        if rule.id == "CACHE_NO_EXPIRE" {
+            continue;
+        }
+
+        if rule.regex.is_match(&code_without_comments) {
+            if let Some(mat) = rule.regex.find(&code_without_comments) {
+                let line_num = code_without_comments[..mat.start()].matches('\n').count() + 1;
+
+                // 去重
+                let exists = issues.iter().any(|i| i.issue_type == rule.id && i.line == line_num);
+
+                if !exists {
+                    issues.push(AstIssue {
+                        severity: rule.severity,
+                        issue_type: rule.id.to_string(),
+                        file: file_name.clone(),
+                        line: line_num,
+                        description: rule.description.to_string(),
+                    });
                 }
             }
         }
     }
-    
+
     issues
 }

@@ -27,6 +27,7 @@ walkdir = "2.4"
 regex = "1.10"
 chrono = "0.4"
 memchr = "2.7"
+once_cell = "1.19"  # 静态正则编译，避免重复创建
 
 # Logging (to stderr only!)
 tracing = "0.1"
