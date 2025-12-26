@@ -11,7 +11,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 # 获取脚本所在目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,22 +35,43 @@ echo -e "${YELLOW}[1/4] 拉取最新代码...${NC}"
 cd "$SCRIPT_DIR"
 git fetch origin
 BEHIND=$(git rev-list HEAD..origin/main --count 2>/dev/null || echo "0")
+if [ "$BEHIND" = "0" ]; then
+    BEHIND=$(git rev-list HEAD..origin/rust-mcp --count 2>/dev/null || echo "0")
+fi
 
 if [ "$BEHIND" = "0" ]; then
     echo -e "${GREEN}✓ 已是最新版本${NC}"
+    # 强制重新编译以防万一
+    FORCE_COMPILE=true
 else
-    echo -e "${YELLOW}  发现 ${BEHIND} 个新提交，正在更新...${NC}"
-    git pull origin main
+    echo -e "${YELLOW}  发现新提交，正在更新...${NC}"
+    git pull origin $(git branch --show-current)
     echo -e "${GREEN}✓ 代码更新完成${NC}"
+    FORCE_COMPILE=true
 fi
 
-# 重新编译 MCP Server
-echo ""
-echo -e "${YELLOW}[2/4] 重新编译 MCP Server...${NC}"
-cd "$SCRIPT_DIR/mcp"
-npm install --silent
-npm run build --silent
-echo -e "${GREEN}✓ MCP Server 编译完成${NC}"
+# 重新编译 MCP Server (如果更新了代码或强制编译)
+if [ "$FORCE_COMPILE" = "true" ]; then
+    echo ""
+    echo -e "${YELLOW}[2/4] 编译 Rust MCP Server...${NC}"
+    if command -v cargo &> /dev/null; then
+        cd "$SCRIPT_DIR/rust-mcp"
+        if cargo build --release; then
+            INSTALL_DIR="$HOME/.local/bin"
+            mkdir -p "$INSTALL_DIR"
+            cp target/release/java-perf "$INSTALL_DIR/java-perf"
+            chmod +x "$INSTALL_DIR/java-perf"
+            echo -e "${GREEN}✓ 编译并安装完成${NC}"
+        else
+            echo -e "${RED}❌ 编译失败${NC}"
+            exit 1
+        fi
+    else
+        echo -e "${YELLOW}⚠ 未安装 Cargo，尝试直接运行 install.sh 下载二进制${NC}"
+        "$SCRIPT_DIR/install.sh"
+        exit 0
+    fi
+fi
 
 # 更新 Skill
 echo ""
@@ -64,17 +85,17 @@ fi
 cp -r "$SKILL_SOURCE" "$SKILL_TARGET"
 echo -e "${GREEN}✓ Skill 更新完成${NC}"
 
-# 重新注册 MCP（确保使用最新编译版本）
+# 重新注册 MCP
 echo ""
 echo -e "${YELLOW}[4/5] 重新注册 MCP Server...${NC}"
-MCP_PATH="$SCRIPT_DIR/mcp/dist/index.js"
+INSTALL_DIR="$HOME/.local/bin"
 
 if command -v claude &> /dev/null; then
     # 清理并重新注册
     claude mcp remove java-perf --scope user 2>/dev/null || true
     claude mcp remove java-perf --scope project 2>/dev/null || true
     sleep 1
-    claude mcp add java-perf --scope user -- node "$MCP_PATH"
+    claude mcp add java-perf --scope user -- "$INSTALL_DIR/java-perf"
     
     # 验证
     sleep 2
@@ -98,7 +119,3 @@ echo -e "${GREEN}"
 echo "╔════════════════════════════════════════════╗"
 echo "║           ✓ 更新完成！                     ║"
 echo "╚════════════════════════════════════════════╝"
-echo -e "${NC}"
-echo ""
-echo "新功能将在下次调用时生效"
-echo ""

@@ -1,2 +1,5 @@
-node_modules/
-dist/
+rust-mcp/target/
+.DS_Store
+.idea/
+.vscode/
+*.swp

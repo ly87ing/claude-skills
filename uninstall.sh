@@ -11,7 +11,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════════╗"
@@ -21,17 +21,30 @@ echo "╚═══════════════════════�
 echo -e "${NC}"
 
 # 移除 MCP
-echo -e "${YELLOW}[1/2] 移除 MCP Server...${NC}"
+echo -e "${YELLOW}[1/3] 移除 MCP Server 注册...${NC}"
 if command -v claude &> /dev/null; then
-    claude mcp remove java-perf 2>/dev/null && echo -e "${GREEN}✓ MCP Server 已移除${NC}" || echo -e "${YELLOW}⚠ MCP Server 未注册或已移除${NC}"
+    claude mcp remove java-perf 2>/dev/null || true
+    claude mcp remove java-perf --scope user 2>/dev/null || true
+    claude mcp remove java-perf --scope project 2>/dev/null || true
+    echo -e "${GREEN}✓ MCP Server 注册已移除${NC}"
 else
-    echo -e "${YELLOW}⚠ claude 命令未找到，请手动移除:${NC}"
-    echo "   claude mcp remove java-perf"
+    echo -e "${YELLOW}⚠ claude 命令未找到，若已注册请手动移除${NC}"
+fi
+
+# 移除二进制文件
+echo ""
+echo -e "${YELLOW}[2/3] 移除二进制文件...${NC}"
+INSTALL_DIR="$HOME/.local/bin"
+if [ -f "$INSTALL_DIR/java-perf" ]; then
+    rm "$INSTALL_DIR/java-perf"
+    echo -e "${GREEN}✓ $INSTALL_DIR/java-perf 已移除${NC}"
+else
+    echo -e "${GREEN}✓ 本地无二进制文件${NC}"
 fi
 
 # 移除 Skill
 echo ""
-echo -e "${YELLOW}[2/2] 移除 Skill...${NC}"
+echo -e "${YELLOW}[3/3] 移除 Skill...${NC}"
 SKILL_TARGET="$HOME/.claude/skills/java-perf"
 if [ -d "$SKILL_TARGET" ]; then
     rm -rf "$SKILL_TARGET"
