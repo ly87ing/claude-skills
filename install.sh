@@ -65,9 +65,10 @@ if command -v claude &> /dev/null; then
     claude mcp remove java-perf -s project 2>/dev/null || true
     sleep 1  # 等待清理完成
     
-    # 重新注册（用户级，全局生效）
+    # 重新注册（用户级，全局生效，使用 node 绝对路径）
     echo "  注册 MCP Server..."
-    claude mcp add java-perf --scope user -- node "$MCP_PATH"
+    NODE_PATH=$(which node)
+    claude mcp add java-perf --scope user -- "$NODE_PATH" "$MCP_PATH"
     
     # 验证注册
     echo "  验证连接..."
