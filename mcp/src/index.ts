@@ -18,6 +18,11 @@ import {
     SYMPTOM_COMBINATIONS,
     type ChecklistItem
 } from './checklist-data.js';
+import { Symptom, InvestigationReport } from './types.js';
+import { analyzeLog, scanEvidenceDir } from './utils/forensic.js';
+import { runSmartAudit } from './utils/audit.js';
+import * as path from 'path';
+import * as fs from 'fs';
 
 // ========== 常量定义 ==========
 const VALID_SYMPTOMS = ['memory', 'cpu', 'slow', 'resource', 'backlog', 'gc'] as const;
@@ -665,11 +670,126 @@ server.tool(
     }
 );
 
+/**
+ * 工具 9: java_perf_investigation (Omni-Engine 全能诊断)
+ * 支持三种模式：证据驱动、症状驱动、基线检查
+ */
+server.tool(
+    'java_perf_investigation',
+    {
+        codePath: z.string()
+            .default('./')
+            .describe('代码根目录'),
+        evidencePath: z.string()
+            .optional()
+            .describe('证据目录（含日志/截图）'),
+        symptoms: z.array(z.enum(VALID_SYMPTOMS))
+            .optional()
+            .describe('症状描述: memory/cpu/slow/resource/backlog/gc')
+    },
+    async ({ codePath, evidencePath, symptoms }) => {
+        const absCodePath = path.resolve(codePath);
+
+        // 上下文容器
+        const ctx = {
+            logs: [] as string[],
+            images: [] as any[],
+            crimeScenes: [] as any[]
+        };
+
+        // === 1. 现场取证 (Forensics) ===
+        if (evidencePath) {
+            const absEvidencePath = path.resolve(evidencePath);
+            if (fs.existsSync(absEvidencePath)) {
+                const evidence = scanEvidenceDir(absEvidencePath);
+
+                // 收集日志分析结果
+                for (const log of evidence.logs) {
+                    ctx.logs.push(log.summary);
+                    ctx.crimeScenes.push(...log.coordinates);
+                }
+
+                // 收集图片
+                for (const img of evidence.images) {
+                    ctx.images.push({
+                        type: 'image',
+                        data: img.base64,
+                        mimeType: img.mimeType
+                    });
+                }
+            }
+        }
+
+        // === 2. 智能审计 (Smart Audit) ===
+        const symptomList = (symptoms || []) as Symptom[];
+        const findings = runSmartAudit(absCodePath, ctx.crimeScenes, symptomList);
+
+        // === 3. 分类结果 ===
+        const rootCauses = findings.filter(f => f.type === 'ROOT_CAUSE');
+        const otherRisks = findings.filter(f => f.type === 'RISK');
+
+        // === 4. 确定模式 ===
+        let mode: InvestigationReport['mode'];
+        if (ctx.crimeScenes.length > 0) {
+            mode = 'Evidence-Driven';
+        } else if (symptomList.length > 0) {
+            mode = 'Symptom-Driven';
+        } else {
+            mode = 'Baseline-Check';
+        }
+
+        // === 5. 生成报告 ===
+        const report: InvestigationReport = {
+            status: 'Success',
+            mode,
+            rootCauses: rootCauses.slice(0, 10),
+            otherRisks: otherRisks.slice(0, 20),
+            logAnalysis: ctx.logs.length > 0 ? ctx.logs : undefined
+        };
+
+        // 生成精简摘要
+        let summary = `## Java Perf Investigation Report\n\n`;
+        summary += `**模式**: ${mode}\n`;
+        summary += `**代码路径**: ${absCodePath}\n\n`;
+
+        if (rootCauses.length > 0) {
+            summary += `### 🎯 根因锁定 (${rootCauses.length} 个)\n`;
+            rootCauses.slice(0, 5).forEach((r, i) => {
+                summary += `${i + 1}. **${r.ruleName}** - \`${r.file}:${r.line}\`\n`;
+                summary += `   ${r.correlation || r.note}\n`;
+            });
+            summary += '\n';
+        }
+
+        if (otherRisks.length > 0) {
+            summary += `### ⚠️ 潜在风险 (${otherRisks.length} 个, 显示前 5)\n`;
+            otherRisks.slice(0, 5).forEach((r, i) => {
+                summary += `${i + 1}. [${r.severity}] ${r.ruleName} - \`${r.file}:${r.line}\`\n`;
+            });
+            summary += '\n';
+        }
+
+        if (ctx.logs.length > 0) {
+            summary += `### 📊 日志分析\n`;
+            ctx.logs.forEach(log => {
+                summary += log + '\n';
+            });
+        }
+
+        return {
+            content: [
+                { type: 'text' as const, text: summary },
+                ...ctx.images
+            ]
+        };
+    }
+);
+
 // ========== 启动服务器 ==========
 async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error('Java Perf MCP Server v1.0.0 running on stdio');
+    console.error('Java Perf MCP Server v2.0.0 (Omni-Engine) running on stdio');
 }
 
 main().catch(console.error);

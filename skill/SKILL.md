@@ -46,26 +46,28 @@ description: Diagnoses Java performance issues. 触发词：性能问题, 分析
 ### 模式 A: 完整模式（MCP 可用）
 
 > [!IMPORTANT]
-> **Token 优化**：使用 `scan_project` 一次获取扫描计划，避免多次往返
+> **推荐使用 Omni-Engine 全能诊断**：一次调用完成日志分析+代码审计+证据链匹配
 
-**Step 1: 获取扫描计划（推荐）**
+**方案 1: 🚀 Omni-Engine 全能诊断（首选）**
 ```
-mcp__java-perf__scan_project({
-  symptoms: ["memory", "slow"]
+mcp__java-perf__java_perf_investigation({
+  codePath: "./",
+  evidencePath: "./logs",     // 可选：日志/截图目录
+  symptoms: ["memory", "slow"] // 可选：症状
 })
 ```
-返回：搜索命令列表 + 检查重点 + 精简报告格式
+返回：根因锁定 + 潜在风险 + 日志分析 + 图片
 
-**Step 2: 按计划搜索（优先 cclsp）**
+**方案 2: 分步诊断**
 ```
+// Step 1: 获取扫描计划
+mcp__java-perf__scan_project({ symptoms: ["memory"] })
+
+// Step 2: 按计划搜索
 mcp__cclsp__find_symbol({ query: "ThreadLocal" })
-mcp__cclsp__find_symbol({ query: "static Map" })
-```
 
-**Step 3: 只读关键文件（限制行数）**
-```
-view_file({ path: "x.java", startLine: 40, endLine: 90 })  // 只读 50 行
-
+// Step 3: 只读关键文件（限制行数）
+view_file({ path: "x.java", startLine: 40, endLine: 90 })
 ```
 
 ---
