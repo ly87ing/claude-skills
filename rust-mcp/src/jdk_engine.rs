@@ -7,6 +7,7 @@ use std::process::Command;
 use std::env;
 
 /// 检查 JDK 是否可用 (旧版兼容)
+#[allow(dead_code)]
 pub fn check_jdk_available() -> bool {
     // 只要能找到任一工具即认为可用
     get_jdk_tool("jstack").is_some() || get_jdk_tool("jmap").is_some()
@@ -39,7 +40,7 @@ fn get_java_home() -> Option<String> {
 fn get_jdk_tool(tool: &str) -> Option<String> {
     // 方案 1: 使用 JAVA_HOME
     if let Some(home) = get_java_home() {
-        let path = format!("{}/bin/{}", home, tool);
+        let path = format!("{home}/bin/{tool}");
         if std::path::Path::new(&path).exists() {
             return Some(path);
         }
@@ -74,7 +75,7 @@ pub fn analyze_thread_dump(pid: u32) -> Result<Value, Box<dyn std::error::Error>
     
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("jstack failed: {}", stderr).into());
+        return Err(format!("jstack failed: {stderr}").into());
     }
     
     let dump = String::from_utf8_lossy(&output.stdout).to_string();
@@ -100,12 +101,11 @@ pub fn analyze_thread_dump(pid: u32) -> Result<Value, Box<dyn std::error::Error>
     }
     
     let mut report = format!(
-        "## 🔬 线程 Dump 分析 (PID: {})\n\n\
+        "## 🔬 线程 Dump 分析 (PID: {pid})\n\n\
         **线程状态**:\n\
-        - RUNNABLE: {}\n\
-        - WAITING: {}\n\
-        - BLOCKED: {}\n\n",
-        pid, runnable, waiting, blocked
+        - RUNNABLE: {runnable}\n\
+        - WAITING: {waiting}\n\
+        - BLOCKED: {blocked}\n\n"
     );
     
     if deadlock {
@@ -114,8 +114,7 @@ pub fn analyze_thread_dump(pid: u32) -> Result<Value, Box<dyn std::error::Error>
     
     if blocked > 10 {
         report.push_str(&format!(
-            "> [!WARNING]\n> {} 个线程处于 BLOCKED 状态，可能存在锁竞争\n\n",
-            blocked
+            "> [!WARNING]\n> {blocked} 个线程处于 BLOCKED 状态，可能存在锁竞争\n\n"
         ));
     }
     
@@ -125,14 +124,14 @@ pub fn analyze_thread_dump(pid: u32) -> Result<Value, Box<dyn std::error::Error>
     
     if total_lines <= 100 {
         // 总行数小于 100，全部显示
-        report.push_str(&format!("### 线程摘要 (全部 {} 行)\n\n```\n", total_lines));
+        report.push_str(&format!("### 线程摘要 (全部 {total_lines} 行)\n\n```\n"));
         report.push_str(&all_lines.join("\n"));
     } else {
         // 显示头尾各 50 行
         let head: Vec<&str> = all_lines.iter().take(50).cloned().collect();
         let tail: Vec<&str> = all_lines.iter().rev().take(50).cloned().collect::<Vec<_>>().into_iter().rev().collect();
         
-        report.push_str(&format!("### 线程摘要 (头 50 + 尾 50 行, 共 {} 行)\n\n```\n", total_lines));
+        report.push_str(&format!("### 线程摘要 (头 50 + 尾 50 行, 共 {total_lines} 行)\n\n```\n"));
         report.push_str(&head.join("\n"));
         report.push_str(&format!("\n\n... 省略 {} 行 ...\n\n", total_lines - 100));
         report.push_str(&tail.join("\n"));
@@ -160,7 +159,7 @@ pub fn analyze_bytecode(class_path: &str) -> Result<Value, Box<dyn std::error::E
     
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("javap failed: {}", stderr).into());
+        return Err(format!("javap failed: {stderr}").into());
     }
     
     let bytecode = String::from_utf8_lossy(&output.stdout);
@@ -192,7 +191,7 @@ pub fn analyze_heap(pid: u32) -> Result<Value, Box<dyn std::error::Error>> {
     
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("jmap failed: {}", stderr).into());
+        return Err(format!("jmap failed: {stderr}").into());
     }
     
     let histo = String::from_utf8_lossy(&output.stdout);

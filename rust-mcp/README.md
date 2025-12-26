@@ -1,9 +1,9 @@
-# Java Perf v4.0.0 (Rust)
+# Java Perf v5.3.0 (Rust)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-4.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/Version-5.3.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Language-Rust-orange" alt="Rust">
-  <img src="https://img.shields.io/badge/Size-1.9MB-green" alt="Binary Size">
+  <img src="https://img.shields.io/badge/Size-2.8MB-green" alt="Binary Size">
   <img src="https://img.shields.io/badge/Dependencies-Zero-purple" alt="No Dependencies">
 </p>
 
@@ -11,7 +11,7 @@ Java 性能诊断 MCP Server - **零依赖，单二进制**
 
 ## 🚀 优势
 
-| 指标 | Node.js (v3.x) | Rust (v4.0) |
+| 指标 | Node.js (v3.x) | Rust (v5.3) |
 |------|---------------|-------------|
 | 安装依赖 | Node.js + npm install | **零依赖** |
 | 二进制大小 | ~50MB | **1.9MB** |
@@ -46,7 +46,7 @@ claude mcp add java-perf --scope user -- ~/.local/bin/java-perf
 | `analyze_thread_dump` | 🔬 jstack 分析 |
 | `get_engine_status` | 引擎状态 |
 
-## 🔍 检测规则 (15+)
+## 🔍 检测规则 (28+)
 
 ### P0 严重
 

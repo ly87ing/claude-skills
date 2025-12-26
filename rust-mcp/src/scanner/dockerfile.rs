@@ -123,11 +123,10 @@ impl CodeAnalyzer for DockerfileAnalyzer {
             }
 
             // 检查 apt install 是否有 clean
-            if RE_RUN_APT_NO_CLEAN.is_match(trimmed) {
-                if !code.contains("apt-get clean") && !code.contains("rm -rf /var/lib/apt") {
+            if RE_RUN_APT_NO_CLEAN.is_match(trimmed)
+                && !code.contains("apt-get clean") && !code.contains("rm -rf /var/lib/apt") {
                     apt_without_clean = true;
                 }
-            }
         }
 
         // 检查多个 RUN 命令 (建议合并)
@@ -137,7 +136,7 @@ impl CodeAnalyzer for DockerfileAnalyzer {
                 severity: Severity::P1,
                 file: file_name.clone(),
                 line: 1,
-                description: format!("有 {} 个 RUN 命令，建议使用 && 合并减少层数", run_count),
+                description: format!("有 {run_count} 个 RUN 命令，建议使用 && 合并减少层数"),
                 context: None,
             });
         }

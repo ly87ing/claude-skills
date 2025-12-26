@@ -25,6 +25,7 @@ pub struct Issue {
 }
 
 /// 代码分析器 Trait
+#[allow(dead_code)]
 pub trait CodeAnalyzer {
     /// 适用的文件扩展名 (e.g., "java")
     fn supported_extension(&self) -> &str;

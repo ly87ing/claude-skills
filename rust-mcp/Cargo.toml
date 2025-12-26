@@ -1,6 +1,6 @@
 [package]
 name = "java-perf"
-version = "4.1.0"
+version = "5.3.0"
 edition = "2021"
 authors = ["ly87ing"]
 description = "Java Performance Diagnostics MCP Server - Radar-Sniper Architecture"

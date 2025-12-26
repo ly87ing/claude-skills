@@ -100,8 +100,8 @@ impl CodeAnalyzer for LineBasedConfigAnalyzer {
                         let value_part = parts[1].trim();
 
                         // 确保 key 匹配 (Key 必须以 pattern 结尾)
-                        if key_part.ends_with(pattern) {
-                             if !(rule.validator)(value_part) {
+                        if key_part.ends_with(pattern)
+                             && !(rule.validator)(value_part) {
                                  issues.push(Issue {
                                     id: rule.id.to_string(),
                                     severity: rule.severity,
@@ -111,7 +111,6 @@ impl CodeAnalyzer for LineBasedConfigAnalyzer {
                                     context: Some(line.to_string()),
                                 });
                              }
-                        }
                     }
                 }
             }

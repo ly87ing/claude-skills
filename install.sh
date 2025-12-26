@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================
-# Java Perf v4.0.0 (Rust) - 一键安装脚本
+# Java Perf v5.3.0 (Rust) - 一键安装脚本
 # ============================================
 
 set -e
@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════════╗"
-echo "║  Java Perf v4.0.0 (Rust Radar-Sniper)      ║"
+echo "║  Java Perf v5.3.0 (Rust Radar-Sniper)      ║"
 echo "║  零依赖，单二进制                           ║"
 echo "╚════════════════════════════════════════════╝"
 echo -e "${NC}"

@@ -8,6 +8,7 @@ use crate::{ast_engine, forensic, jdk_engine, checklist};
 
 /// JSON-RPC 请求
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct JsonRpcRequest {
     jsonrpc: String,
     method: String,
@@ -48,6 +49,7 @@ enum McpErrorCode {
 }
 
 impl McpErrorCode {
+    #[allow(dead_code)]
     fn code(&self) -> i32 {
         *self as i32
     }
@@ -176,6 +178,20 @@ fn get_tools() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "get_project_summary",
+                "description": "📋 项目摘要 - 统计文件数/包数/主要依赖，帮助建立上下文",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "codePath": {
+                            "type": "string",
+                            "description": "项目根路径"
+                        }
+                    },
+                    "required": ["codePath"]
+                }
             }
         ]
     })
@@ -218,6 +234,7 @@ pub fn handle_request(request: &str) -> Result<String, Box<dyn std::error::Error
 }
 
 /// 创建错误响应
+#[allow(dead_code)]
 pub fn create_error_response(request: &str, error: &str) -> String {
     let id = serde_json::from_str::<JsonRpcRequest>(request)
         .map(|r| r.id)
@@ -245,9 +262,115 @@ fn handle_initialize(_params: &Option<Value>) -> Result<Value, Box<dyn std::erro
         },
         "serverInfo": {
             "name": "java-perf",
-            "version": "4.0.0"
+            "version": "5.2.0"
         }
     }))
+}
+
+/// 获取项目摘要
+fn get_project_summary(code_path: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    use std::collections::{HashMap, HashSet};
+    use std::path::Path;
+    use walkdir::WalkDir;
+
+    let path = Path::new(code_path);
+    if !path.exists() {
+        return Err(format!("Path not found: {code_path}").into());
+    }
+
+    let mut java_files = 0;
+    let mut xml_files = 0;
+    let mut yml_files = 0;
+    let mut packages: HashSet<String> = HashSet::new();
+    let mut dependencies: HashMap<String, bool> = HashMap::new();
+
+    // 扫描文件
+    for entry in WalkDir::new(path)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let file_path = entry.path();
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        match ext {
+            "java" => {
+                java_files += 1;
+                // 提取包名
+                if let Ok(content) = std::fs::read_to_string(file_path) {
+                    for line in content.lines().take(10) {
+                        if line.starts_with("package ") {
+                            let pkg = line.trim_start_matches("package ")
+                                .trim_end_matches(';')
+                                .trim();
+                            packages.insert(pkg.to_string());
+                            break;
+                        }
+                    }
+                }
+            },
+            "xml" => {
+                xml_files += 1;
+                // 检测 pom.xml
+                if file_name == "pom.xml" {
+                    dependencies.insert("Maven".to_string(), true);
+                    // 检测常见依赖
+                    if let Ok(content) = std::fs::read_to_string(file_path) {
+                        if content.contains("spring-boot") {
+                            dependencies.insert("Spring Boot".to_string(), true);
+                        }
+                        if content.contains("mybatis") {
+                            dependencies.insert("MyBatis".to_string(), true);
+                        }
+                        if content.contains("reactor") || content.contains("webflux") {
+                            dependencies.insert("Reactor/WebFlux".to_string(), true);
+                        }
+                        if content.contains("jedis") || content.contains("lettuce") {
+                            dependencies.insert("Redis".to_string(), true);
+                        }
+                        if content.contains("kafka") {
+                            dependencies.insert("Kafka".to_string(), true);
+                        }
+                    }
+                }
+            },
+            "yml" | "yaml" => yml_files += 1,
+            "gradle" | "kts" => {
+                dependencies.insert("Gradle".to_string(), true);
+            },
+            _ => {}
+        }
+    }
+
+    // 生成报告
+    let mut report = format!(
+        "## 📋 项目摘要: {}\\n\\n\
+        **文件统计**:\\n\
+        - Java 文件: {}\\n\
+        - XML 配置: {}\\n\
+        - YAML 配置: {}\\n\\n\
+        **包结构** ({} 个包):\\n",
+        code_path, java_files, xml_files, yml_files, packages.len()
+    );
+
+    // 显示前 10 个包
+    for pkg in packages.iter().take(10) {
+        report.push_str(&format!("- `{pkg}`\\n"));
+    }
+    if packages.len() > 10 {
+        report.push_str(&format!("- ... 还有 {} 个包\\n", packages.len() - 10));
+    }
+
+    if !dependencies.is_empty() {
+        report.push_str("\\n**检测到的技术栈**:\\n");
+        for dep in dependencies.keys() {
+            report.push_str(&format!("- {dep}\\n"));
+        }
+    }
+
+    Ok(json!(report))
 }
 
 /// 处理工具调用
@@ -319,18 +442,32 @@ fn handle_tool_call(params: &Option<Value>) -> Result<Value, Box<dyn std::error:
         },
         "get_engine_status" => {
             Ok(json!({
-                "version": "4.1.0",
+                "version": "5.3.0",
                 "engine": "Rust Radar-Sniper",
                 "ast_analyzer": "Tree-sitter + Regex (hybrid)",
+                "ast_rules": [
+                    "N_PLUS_ONE", "NESTED_LOOP", "SYNC_METHOD", "THREADLOCAL_LEAK", 
+                    "STREAM_RESOURCE_LEAK", "SLEEP_IN_LOCK", "LOCK_METHOD_CALL"
+                ],
+                "regex_rules": [
+                    "FUTURE_GET_NO_TIMEOUT", "AWAIT_NO_TIMEOUT", "REENTRANT_LOCK_RISK",
+                    "COMPLETABLE_JOIN", "LOG_STRING_CONCAT", "DATASOURCE_NO_POOL"
+                ],
                 "jdk_tools": {
                     "jstack": jdk_engine::check_tool_available("jstack"),
                     "jmap": jdk_engine::check_tool_available("jmap"),
                     "javap": jdk_engine::check_tool_available("javap"),
                 },
-                "available_tools": ["radar_scan", "scan_source_code", "analyze_log", "analyze_thread_dump", "analyze_bytecode", "analyze_heap"]
+                "available_tools": ["radar_scan", "scan_source_code", "analyze_log", "analyze_thread_dump", "analyze_bytecode", "analyze_heap", "get_project_summary"]
             }))
         },
-        _ => Err(format!("Unknown tool: {}", tool_name).into()),
+        "get_project_summary" => {
+            let code_path = arguments.get("codePath")
+                .and_then(|v| v.as_str())
+                .unwrap_or("./");
+            get_project_summary(code_path)
+        },
+        _ => Err(format!("Unknown tool: {tool_name}").into()),
     };
     
     match result {
@@ -382,7 +519,7 @@ impl McpServer {
                         let _ = std::io::stdout().flush();
                     },
                     Err(e) => {
-                        eprintln!("Error handling request: {}", e);
+                        eprintln!("Error handling request: {e}");
                     }
                 }
             }

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use regex::Regex;
 
 /// 安全限制
+#[allow(dead_code)]
 const MAX_MEMORY_MB: usize = 1024;
 const MS_PER_MB: u64 = 100;
 const MIN_PROCESS_TIME_MS: u64 = 30000;
@@ -27,6 +28,7 @@ static LOCATION_REGEX: Lazy<Regex> = Lazy::new(|| {
 
 /// 异常指纹
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 struct ExceptionFingerprint {
     exception_type: String,
     location: String,
@@ -38,7 +40,7 @@ struct ExceptionFingerprint {
 pub fn analyze_log(log_path: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let path = Path::new(log_path);
     if !path.exists() {
-        return Err(format!("Log file not found: {}", log_path).into());
+        return Err(format!("Log file not found: {log_path}").into());
     }
     
     let file = File::open(path)?;
@@ -95,7 +97,7 @@ pub fn analyze_log(log_path: &str) -> Result<Value, Box<dyn std::error::Error>> 
                     })
                     .unwrap_or_else(|| "Unknown".to_string());
                 
-                let fingerprint = format!("{}@{}", ex_type, location);
+                let fingerprint = format!("{ex_type}@{location}");
                 
                 let entry = exception_map.entry(fingerprint.clone()).or_insert_with(|| {
                     ExceptionFingerprint {
@@ -130,7 +132,7 @@ pub fn analyze_log(log_path: &str) -> Result<Value, Box<dyn std::error::Error>> 
     );
     
     if truncated {
-        report.push_str(&format!("\n> [!CAUTION]\n> {}\n\n", truncate_reason));
+        report.push_str(&format!("\n> [!CAUTION]\n> {truncate_reason}\n\n"));
     }
     
     if !fingerprints.is_empty() {

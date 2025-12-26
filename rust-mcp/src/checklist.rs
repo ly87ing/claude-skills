@@ -87,6 +87,41 @@ pub fn get_checklist_data() -> Vec<CheckSection> {
                     fix: None,
                     why: Some("线程A持有锁1等锁2，线程B持有锁2等锁1".to_string()),
                 },
+                CheckItem {
+                    desc: "ReentrantLock 未在 finally 中释放".to_string(),
+                    verify: Some("搜索 lock.lock() 调用，检查是否有 finally { unlock }".to_string()),
+                    threshold: None,
+                    fix: Some("lock.lock(); try { ... } finally { lock.unlock(); }".to_string()),
+                    why: Some("异常时锁不释放，其他线程永久等待".to_string()),
+                },
+                CheckItem {
+                    desc: "synchronized 块内 Thread.sleep()".to_string(),
+                    verify: Some("搜索 synchronized 块内的 sleep 调用".to_string()),
+                    threshold: None,
+                    fix: Some("将 sleep 移出 synchronized 块或使用 wait/notify".to_string()),
+                    why: Some("持锁睡眠导致其他线程长时间阻塞".to_string()),
+                },
+                CheckItem {
+                    desc: "Future.get() 无超时参数".to_string(),
+                    verify: Some("搜索 .get() 调用，检查是否有超时参数".to_string()),
+                    threshold: None,
+                    fix: Some("使用 future.get(timeout, TimeUnit.SECONDS)".to_string()),
+                    why: Some("无超时会导致线程永久阻塞".to_string()),
+                },
+                CheckItem {
+                    desc: "CountDownLatch.await() / Semaphore.acquire() 无超时".to_string(),
+                    verify: Some("搜索 .await() 或 .acquire() 调用".to_string()),
+                    threshold: None,
+                    fix: Some("使用 await(timeout, unit) 或 tryAcquire(timeout, unit)".to_string()),
+                    why: Some("无超时可能永久等待".to_string()),
+                },
+                CheckItem {
+                    desc: "CompletableFuture.join() 同步阻塞".to_string(),
+                    verify: Some("搜索 .join() 调用".to_string()),
+                    threshold: None,
+                    fix: Some("使用 orTimeout() 或 completeOnTimeout()".to_string()),
+                    why: Some("join() 永久阻塞，无法设置超时".to_string()),
+                },
             ],
         },
         CheckSection {
@@ -270,10 +305,10 @@ pub fn get_checklist(symptoms: &[&str], priority_filter: Option<&str>, compact: 
             for item in &section.items {
                 report.push_str(&format!("- **{}**\n", item.desc));
                 if let Some(verify) = &item.verify {
-                    report.push_str(&format!("  - 验证: `{}`\n", verify));
+                    report.push_str(&format!("  - 验证: `{verify}`\n"));
                 }
                 if let Some(fix) = &item.fix {
-                    report.push_str(&format!("  - 修复: {}\n", fix));
+                    report.push_str(&format!("  - 修复: {fix}\n"));
                 }
             }
             report.push('\n');
@@ -305,7 +340,7 @@ pub fn get_all_antipatterns() -> Result<Value, Box<dyn std::error::Error>> {
     report.push_str("|--------|------|----------|\n");
     
     for (name, desc, fix) in patterns {
-        report.push_str(&format!("| `{}` | {} | {} |\n", name, desc, fix));
+        report.push_str(&format!("| `{name}` | {desc} | {fix} |\n"));
     }
     
     Ok(json!(report))

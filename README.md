@@ -1,31 +1,37 @@
-# Java Perf v4.1.0 (Rust)
+# Java Perf v5.3.0 (Rust)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-4.1.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/Version-5.3.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Language-Rust-orange" alt="Rust">
   <img src="https://img.shields.io/badge/Size-1.9MB-green" alt="Binary Size">
   <img src="https://img.shields.io/badge/Dependencies-Zero-purple" alt="No Dependencies">
-  <img src="https://img.shields.io/badge/Tools-9-blue" alt="MCP Tools">
+  <img src="https://img.shields.io/badge/Tools-10-blue" alt="MCP Tools">
 </p>
 
-A Claude Skill + MCP Server for diagnosing Java performance issues using the **Radar-Sniper Architecture**.
+A Claude Skill + MCP Server for diagnosing Java performance issues using the **Radar-Sniper Architecture v2**.
 
 **Now powered by Rust 🦀 for extreme performance!**
 
 ## 🏆 Architecture
 
 ```
+Phase 0: 🧠 Knowledge Preload (LLM Reasoning)
+└── Load checklist & antipatterns for guided analysis
+
 Phase 1: 🛰️ Radar (Zero Cost)
 └── Rust AST Engine - Millisecond-level full project scan
+    ├── Tree-sitter AST (for/while/foreach loops)
     ├── Static Regex Compilation (Lazy)
-    ├── Comment Filtering
-    └── 17+ Performance Rules (P0/P1)
+    └── 20+ Performance Rules (P0/P1)
 
-Phase 2: 🎯 Sniper (Verification)
-└── Verify context and provide fixes
+Phase 2: 🎯 Sniper (LLM Verification + Reasoning)
+└── LSP-guided context verification with causal chain analysis
 
 Phase 3: 🔬 Forensic (Deep Dive)
 └── JDK CLI Integration - jstack/javap/jmap support
+
+Phase 4: 📊 Impact Assessment (LLM Reasoning)
+└── Quantified impact analysis (memory growth, latency multiplier)
 ```
 
 ## 🚀 Advantages
@@ -70,7 +76,7 @@ cargo build --release
 claude mcp add java-perf --scope user -- $(pwd)/target/release/java-perf
 ```
 
-## 🔧 MCP Tools (9 Tools)
+## 🔧 MCP Tools (10 Tools)
 
 ### 📚 Knowledge Base
 | Tool | Description |
@@ -83,6 +89,7 @@ claude mcp add java-perf --scope user -- $(pwd)/target/release/java-perf
 |------|-------------|
 | `radar_scan` | Project-wide AST scan for performance risks |
 | `scan_source_code` | Single file AST analysis |
+| `get_project_summary` | 📋 Project structure summary (files, packages, tech stack) |
 
 ### 🔬 Forensic (Diagnostics)
 | Tool | Description |
@@ -97,30 +104,39 @@ claude mcp add java-perf --scope user -- $(pwd)/target/release/java-perf
 |------|-------------|
 | `get_engine_status` | Check engine & JDK status |
 
-## 🔍 Detection Rules (17 Rules)
+## 🔍 Detection Rules (28+ Rules)
 
-### 🔴 P0 Critical
-| ID | Description |
-|----|-------------|
-| `N_PLUS_ONE` | IO/DB calls inside loops |
-| `NESTED_LOOP` | Nested loops O(N*M) |
-| `SYNC_METHOD` | Synchronized on method level |
-| `THREADLOCAL_LEAK` | ThreadLocal missing .remove() |
-| `UNBOUNDED_POOL` | Executors.newCachedThreadPool |
-| `UNBOUNDED_CACHE` | static Map without eviction |
-| `UNBOUNDED_LIST` | static List/Set growing indefinitely |
-| `EMITTER_UNBOUNDED` | Reactor EmitterProcessor (Backpressure) |
+### 🔴 P0 Critical (AST-based)
+| ID | Description | Engine |
+|----|-------------|--------|
+| `N_PLUS_ONE` | IO/DB calls inside for/while/foreach loops | Tree-sitter AST |
+| `NESTED_LOOP` | Nested loops (for-for, foreach-foreach, mixed) O(N*M) | Tree-sitter AST |
+| `SYNC_METHOD` | Synchronized on method level | Tree-sitter AST |
+| `THREADLOCAL_LEAK` | ThreadLocal.set() without remove() | Tree-sitter AST |
+| `SLEEP_IN_LOCK` | Thread.sleep() inside synchronized block | Tree-sitter AST |
+| `LOCK_METHOD_CALL` | ReentrantLock.lock() without finally unlock | Tree-sitter AST |
+| `UNBOUNDED_POOL` | Executors.newCachedThreadPool | Regex |
+| `UNBOUNDED_CACHE` | static Map without eviction | Regex |
+| `UNBOUNDED_LIST` | static List/Set growing indefinitely | Regex |
+| `EMITTER_UNBOUNDED` | Reactor EmitterProcessor (Backpressure) | Regex |
+| `FUTURE_GET_NO_TIMEOUT` | Future.get() without timeout (blocks forever) | Regex |
+| `AWAIT_NO_TIMEOUT` | await()/acquire() without timeout | Regex |
+| `REENTRANT_LOCK_RISK` | ReentrantLock usage (verify unlock in finally) | Regex |
 
 ### 🟡 P1 Warning
-| ID | Description |
-|----|-------------|
-| `OBJECT_IN_LOOP` | Object allocation inside loops |
-| `SYNC_BLOCK` | Large synchronized block |
-| `ATOMIC_SPIN` | High contention atomic |
-| `NO_TIMEOUT` | HTTP client without timeout |
-| `BLOCKING_IO` | Blocking IO in async context |
-| `SINKS_NO_BACKPRESSURE` | Sinks.many() without handling |
-| `CACHE_NO_EXPIRE` | Cache missing expireAfterWrite |
+| ID | Description | Engine |
+|----|-------------|--------|
+| `STREAM_RESOURCE_LEAK` | Stream/Connection created in try block | Tree-sitter AST |
+| `OBJECT_IN_LOOP` | Object allocation inside loops | Regex |
+| `SYNC_BLOCK` | Large synchronized block | Regex |
+| `ATOMIC_SPIN` | High contention atomic | Regex |
+| `NO_TIMEOUT` | HTTP client without timeout | Regex |
+| `BLOCKING_IO` | Blocking IO in async context | Regex |
+| `SINKS_NO_BACKPRESSURE` | Sinks.many() without handling | Regex |
+| `CACHE_NO_EXPIRE` | Cache missing expireAfterWrite | Regex |
+| `COMPLETABLE_JOIN` | CompletableFuture.join() without timeout | Regex |
+| `LOG_STRING_CONCAT` | Logger with string concatenation (use placeholders) | Regex |
+| `DATASOURCE_NO_POOL` | DriverManager.getConnection (no pool) | Regex |
 
 ## 📝 Usage Examples
 

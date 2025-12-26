@@ -84,6 +84,42 @@ static RE_CACHE_NO_EXPIRE: Lazy<Regex> = Lazy::new(|| {
 });
 
 // ============================================================================
+// 新增规则 (v5.3)
+// ============================================================================
+
+// P0: 阻塞调用无超时
+static RE_FUTURE_GET_NO_TIMEOUT: Lazy<Regex> = Lazy::new(|| {
+    // 匹配 .get() 但不匹配 .get(timeout, unit)
+    Regex::new(r"\.get\s*\(\s*\)").unwrap()
+});
+static RE_AWAIT_NO_TIMEOUT: Lazy<Regex> = Lazy::new(|| {
+    // CountDownLatch.await() 或 Semaphore.acquire() 无超时
+    Regex::new(r"\.(await|acquire)\s*\(\s*\)").unwrap()
+});
+static RE_COMPLETABLE_JOIN: Lazy<Regex> = Lazy::new(|| {
+    // CompletableFuture.join() 永久阻塞
+    Regex::new(r"\.join\s*\(\s*\)").unwrap()
+});
+
+// P0: 锁相关
+static RE_REENTRANT_LOCK: Lazy<Regex> = Lazy::new(|| {
+    // 检测 ReentrantLock 使用
+    Regex::new(r"ReentrantLock|ReadWriteLock|StampedLock").unwrap()
+});
+
+// P1: 日志问题
+static RE_LOG_STRING_CONCAT: Lazy<Regex> = Lazy::new(|| {
+    // logger.debug("x=" + x) 应使用占位符
+    Regex::new(r"(log|logger|LOG|LOGGER)\s*\.\s*(debug|info|warn|error|trace)\s*\([^)]*\+").unwrap()
+});
+
+// P1: 连接池配置
+static RE_DATASOURCE_NO_POOL: Lazy<Regex> = Lazy::new(|| {
+    // DriverManager.getConnection 直接使用，无连接池
+    Regex::new(r"DriverManager\s*\.\s*getConnection").unwrap()
+});
+
+// ============================================================================
 // 规则定义
 // ============================================================================
 
@@ -120,13 +156,19 @@ fn get_rules() -> Vec<Rule> {
         // Rule { id: "NESTED_LOOP", ... }
         // Rule { id: "SYNC_METHOD", ... }
         
-        // P0 严重
+        // P0 严重 - 原有规则
         Rule { id: "UNBOUNDED_POOL", description: "无界线程池 Executors", severity: Severity::P0, regex: &RE_UNBOUNDED_POOL },
         Rule { id: "UNBOUNDED_CACHE", description: "无界缓存 static Map", severity: Severity::P0, regex: &RE_UNBOUNDED_CACHE_MAP },
         Rule { id: "UNBOUNDED_LIST", description: "无界缓存 static List/Set", severity: Severity::P0, regex: &RE_UNBOUNDED_CACHE_LIST },
         Rule { id: "EXCEPTION_IGNORE", description: "空 catch 块", severity: Severity::P0, regex: &RE_EXCEPTION_IGNORE },
         Rule { id: "EMITTER_UNBOUNDED", description: "EmitterProcessor 无界 (背压问题)", severity: Severity::P0, regex: &RE_EMITTER_UNBOUNDED },
-        // P1 警告
+        
+        // P0 严重 - 新增规则 (v5.3)
+        Rule { id: "FUTURE_GET_NO_TIMEOUT", description: "Future.get() 无超时，可能永久阻塞", severity: Severity::P0, regex: &RE_FUTURE_GET_NO_TIMEOUT },
+        Rule { id: "AWAIT_NO_TIMEOUT", description: "await()/acquire() 无超时，可能永久阻塞", severity: Severity::P0, regex: &RE_AWAIT_NO_TIMEOUT },
+        Rule { id: "REENTRANT_LOCK_RISK", description: "ReentrantLock 使用 (确保 unlock 在 finally)", severity: Severity::P0, regex: &RE_REENTRANT_LOCK },
+        
+        // P1 警告 - 原有规则
         Rule { id: "OBJECT_IN_LOOP", description: "循环内创建对象", severity: Severity::P1, regex: &RE_OBJECT_IN_LOOP },
         Rule { id: "SYNC_BLOCK", description: "synchronized 代码块", severity: Severity::P1, regex: &RE_SYNC_BLOCK },
         Rule { id: "ATOMIC_SPIN", description: "Atomic 自旋 (考虑 LongAdder)", severity: Severity::P1, regex: &RE_ATOMIC_SPIN },
@@ -136,6 +178,11 @@ fn get_rules() -> Vec<Rule> {
         Rule { id: "EXCEPTION_SWALLOW", description: "异常被吞没 (仅打印)", severity: Severity::P1, regex: &RE_EXCEPTION_SWALLOW },
         Rule { id: "SINKS_NO_BACKPRESSURE", description: "Sinks.many() 无背压处理", severity: Severity::P1, regex: &RE_SINKS_NO_BACKPRESSURE },
         Rule { id: "CACHE_NO_EXPIRE", description: "Cache 可能无过期配置", severity: Severity::P1, regex: &RE_CACHE_NO_EXPIRE },
+        
+        // P1 警告 - 新增规则 (v5.3)
+        Rule { id: "COMPLETABLE_JOIN", description: "CompletableFuture.join() 无超时", severity: Severity::P1, regex: &RE_COMPLETABLE_JOIN },
+        Rule { id: "LOG_STRING_CONCAT", description: "日志字符串拼接 (应用占位符)", severity: Severity::P1, regex: &RE_LOG_STRING_CONCAT },
+        Rule { id: "DATASOURCE_NO_POOL", description: "DriverManager 直接获取连接 (无连接池)", severity: Severity::P1, regex: &RE_DATASOURCE_NO_POOL },
     ]
 }
 
@@ -227,12 +274,14 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
 
         // 合并到全局 issues
         if !local_issues.is_empty() {
-            let mut global = issues.lock().unwrap();
+            // 使用 unwrap_or_else 处理 poisoned mutex（如果持锁线程 panic）
+            let mut global = issues.lock().unwrap_or_else(|e| e.into_inner());
             global.extend(local_issues);
         }
     });
 
-    let issues = issues.into_inner().unwrap();
+    // 安全地解包：如果 mutex 被 poisoned，仍然获取内部数据
+    let issues = issues.into_inner().unwrap_or_else(|e| e.into_inner());
     let p0_count = issues.iter().filter(|i| matches!(i.severity, Severity::P0)).count();
     let p1_count = issues.iter().filter(|i| matches!(i.severity, Severity::P1)).count();
 
@@ -240,8 +289,7 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
     if compact {
         // 紧凑模式：只返回 P0，精简格式
         let mut report = format!(
-            "## 🛰️ 雷达扫描 (v5.1 并行)\n\n**P0**: {} | **P1**: {} | **文件**: {}\n\n",
-            p0_count, p1_count, file_count
+            "## 🛰️ 雷达扫描 (v5.1 并行)\n\n**P0**: {p0_count} | **P1**: {p1_count} | **文件**: {file_count}\n\n"
         );
 
         if p0_count > 0 {
@@ -256,7 +304,7 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
         }
 
         if p1_count > 0 {
-            report.push_str(&format!("\n*（{} 个 P1 警告已省略，使用 compact=false 查看）*\n", p1_count));
+            report.push_str(&format!("\n*（{p1_count} 个 P1 警告已省略，使用 compact=false 查看）*\n"));
         }
 
         Ok(json!(report))
@@ -281,7 +329,7 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
         }
 
         if p1_count > 0 {
-            report.push_str(&format!("### 🟡 P1 警告 (显示前 {})\n\n", max_p1));
+            report.push_str(&format!("### 🟡 P1 警告 (显示前 {max_p1})\n\n"));
             for issue in issues.iter().filter(|i| matches!(i.severity, Severity::P1)).take(max_p1) {
                 report.push_str(&format!(
                     "- **{}** - `{}:{}` - {}\n",
@@ -318,7 +366,7 @@ pub fn scan_source_code(code: &str, file_path: &str) -> Result<Value, Box<dyn st
         }
     }
 
-    let mut report = format!("## 🛰️ 扫描: {}\n\n", file_path);
+    let mut report = format!("## 🛰️ 扫描: {file_path}\n\n");
 
     if issues.is_empty() {
         report.push_str("✅ 未发现明显性能问题\n");
@@ -368,8 +416,8 @@ fn analyze_java_code(code: &str, file_path: &str) -> Vec<AstIssue> {
     */
 
     // 3. 特殊检测：Cache 需要 expire 配置
-    if RE_CACHE_NO_EXPIRE.is_match(&code_without_comments) {
-        if !code_without_comments.contains("expire") && !code_without_comments.contains("maximumSize") {
+    if RE_CACHE_NO_EXPIRE.is_match(&code_without_comments)
+        && !code_without_comments.contains("expire") && !code_without_comments.contains("maximumSize") {
             if let Some(mat) = RE_CACHE_NO_EXPIRE.find(&code_without_comments) {
                 let line_num = code_without_comments[..mat.start()].matches('\n').count() + 1;
                 issues.push(AstIssue {
@@ -381,7 +429,6 @@ fn analyze_java_code(code: &str, file_path: &str) -> Vec<AstIssue> {
                 });
             }
         }
-    }
 
     // 4. 使用静态编译的正则进行匹配
     let rules = get_rules();

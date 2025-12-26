@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================
-# Java Perf v4.0.0 (Rust) - 一键安装脚本
+# Java Perf v5.3.0 (Rust) - 一键安装脚本
 # ============================================
 
 set -e
@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════════╗"
-echo "║  Java Perf v4.0.0 (Rust Radar-Sniper)      ║"
+echo "║  Java Perf v5.3.0 (Rust Radar-Sniper)      ║"
 echo "║  零依赖，单二进制                           ║"
 echo "╚════════════════════════════════════════════╝"
 echo -e "${NC}"
@@ -66,7 +66,7 @@ elif command -v curl &> /dev/null; then
         echo -e "${YELLOW}⚠ 下载失败，尝试从源码编译...${NC}"
         # 从源码编译
         if command -v cargo &> /dev/null; then
-            cd "$SCRIPT_DIR/rust-mcp"
+            # 已经在 rust-mcp 目录，直接编译
             cargo build --release
             cp target/release/java-perf "$INSTALL_DIR/java-perf"
             echo -e "${GREEN}✓ 编译完成${NC}"
