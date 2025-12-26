@@ -58,10 +58,11 @@ echo -e "${YELLOW}[3/4] 注册 MCP 到 Claude Code（用户级）...${NC}"
 
 # 检查 claude 命令
 if command -v claude &> /dev/null; then
-    # 强制移除所有旧注册（用户级 + 项目级）
+    # 强制移除所有旧注册（所有 scope）
     echo "  清理旧注册..."
-    claude mcp remove java-perf --scope user 2>/dev/null || true
-    claude mcp remove java-perf --scope project 2>/dev/null || true
+    claude mcp remove java-perf -s local 2>/dev/null || true
+    claude mcp remove java-perf -s user 2>/dev/null || true
+    claude mcp remove java-perf -s project 2>/dev/null || true
     sleep 1  # 等待清理完成
     
     # 重新注册（用户级，全局生效）
