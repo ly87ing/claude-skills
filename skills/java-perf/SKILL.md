@@ -1,12 +1,57 @@
 ---
 name: java-perf
 description: Diagnoses Java performance issues using AST analysis and LSP reasoning. Identifies N+1 queries, memory leaks, lock contention, and concurrency risks. Use when users mention "slow response", "high CPU", "memory leak", "OOM", "deadlock", or generic performance problems.
-allowed-tools: mcp__java-perf__radar_scan, mcp__java-perf__scan_source_code, mcp__java-perf__analyze_log, mcp__java-perf__analyze_thread_dump, mcp__java-perf__analyze_heap, mcp__java-perf__analyze_bytecode, mcp__java-perf__get_checklist, mcp__java-perf__get_all_antipatterns, mcp__java-perf__get_engine_status, mcp__cclsp__find_symbol, mcp__cclsp__find_definition, view_file
+allowed-tools: Bash, Read, mcp__cclsp__find_definition, mcp__cclsp__find_references
 ---
 
 # Java Performance Expert (Radar-Sniper Protocol v2)
 
 > **核心原则**：知识预加载 → 雷达扫描（0 Token）→ 狙击验证（LSP 推理）→ 法医取证（可选）→ 影响评估
+
+---
+
+## 调用方式
+
+本工具支持 CLI 模式，**默认输出人类可读格式**，直接可用无需解析。
+
+### CLI 命令 (推荐)
+
+```bash
+# 雷达扫描 - 全项目 AST 分析（默认只显示 P0）
+java-perf scan --path ./src
+
+# 显示完整扫描结果（包含 P1）
+java-perf scan --path ./src --full
+
+# 单文件分析
+java-perf analyze --file ./Foo.java
+
+# 检查清单 (根据症状)
+java-perf checklist --symptoms memory,cpu
+
+# 反模式列表
+java-perf antipatterns
+
+# 日志分析
+java-perf log --file ./app.log
+
+# JDK 工具
+java-perf jstack --pid 12345
+java-perf jmap --pid 12345
+java-perf javap --class ./Target.class
+
+# 项目摘要
+java-perf summary --path ./
+
+# 引擎状态
+java-perf status
+
+# 需要 JSON 输出时加 --json
+java-perf --json scan --path ./
+```
+
+> [!TIP]
+> CLI 默认输出 **人类可读的 Markdown**，无需解析，直接可用。
 
 ---
 
@@ -16,13 +61,13 @@ allowed-tools: mcp__java-perf__radar_scan, mcp__java-perf__scan_source_code, mcp
 > **先加载知识库，再扫描代码**。避免遗漏检查项，输出更专业。
 
 **当用户症状明确时**（如"内存暴涨"、"响应慢"）：
-```
-mcp__java-perf__get_checklist({ symptoms: ["memory"], compact: false })
+```bash
+java-perf checklist --symptoms memory
 ```
 
 **获取全部反模式清单**（用于通用分析）：
-```
-mcp__java-perf__get_all_antipatterns({})
+```bash
+java-perf antipatterns
 ```
 
 **用途**：
@@ -38,17 +83,14 @@ mcp__java-perf__get_all_antipatterns({})
 > **必须先执行雷达扫描**，不要直接搜索文件或使用 grep。
 
 **首选：全项目扫描**
-```
-mcp__java-perf__radar_scan({ codePath: "./" })
+```bash
+java-perf scan --path ./
 ```
 返回：全项目嫌疑点列表（P0/P1 分类）
 
 **备选：单文件扫描**
-```
-mcp__java-perf__scan_source_code({
-  code: "文件内容",
-  filePath: "xxx.java"
-})
+```bash
+java-perf analyze --file ./UserService.java
 ```
 
 ---
@@ -62,12 +104,12 @@ mcp__java-perf__scan_source_code({
 
 ### 步骤 1: 跳转到嫌疑位置
 ```
-mcp__cclsp__find_symbol({ query: "嫌疑方法名" })
+mcp__cclsp__find_definition({ file_path: "UserService.java", symbol_name: "findById" })
 ```
 
 ### 步骤 2: 读取关键代码（限制 50 行）
 ```
-view_file({ path: "x.java", startLine: 100, endLine: 150 })
+Read file: UserService.java (lines 100-150)
 ```
 
 ### 步骤 3: 执行推理验证（关键！）
@@ -84,7 +126,7 @@ view_file({ path: "x.java", startLine: 100, endLine: 150 })
 
 当 N+1 嫌疑需要确认被调用方法时：
 ```
-mcp__cclsp__find_definition({ symbol: "findByUserId" })
+mcp__cclsp__find_definition({ file_path: "UserService.java", symbol_name: "findByUserId" })
 ```
 然后检查目标方法的：
 - 类注解：`@Repository`, `@Mapper`, `@FeignClient`
@@ -96,13 +138,13 @@ mcp__cclsp__find_definition({ symbol: "findByUserId" })
 
 仅当需要运行时分析时使用：
 
-| 场景 | 工具 |
+| 场景 | 命令 |
 |------|------|
-| 线程死锁/阻塞 | `mcp__java-perf__analyze_thread_dump({ pid: 12345 })` |
-| 字节码锁分析 | `mcp__java-perf__analyze_bytecode({ classPath: "x.class" })` |
-| 堆内存分析 | `mcp__java-perf__analyze_heap({ pid: 12345 })` |
-| 日志异常归类 | `mcp__java-perf__analyze_log({ logPath: "app.log" })` |
-| 引擎状态 | `mcp__java-perf__get_engine_status({})` |
+| 线程死锁/阻塞 | `java-perf jstack --pid 12345` |
+| 字节码锁分析 | `java-perf javap --class ./Target.class` |
+| 堆内存分析 | `java-perf jmap --pid 12345` |
+| 日志异常归类 | `java-perf log --file ./app.log` |
+| 引擎状态 | `java-perf status` |
 
 ---
 
@@ -161,15 +203,15 @@ mcp__cclsp__find_definition({ symbol: "findByUserId" })
 
 ```
 # Phase 0: 知识预加载
-mcp__java-perf__get_checklist({ symptoms: ["memory"] })
+java-perf checklist --symptoms memory
 → 获取内存相关检查项：ThreadLocal、无界缓存、大对象...
 
 # Phase 1: 雷达扫描
-mcp__java-perf__radar_scan({ codePath: "./" })
+java-perf scan --path ./
 → 发现 TraceStore.java:45 ThreadLocal 嫌疑
 
 # Phase 2: 狙击验证
-view_file({ path: "TraceStore.java", startLine: 40, endLine: 60 })
+Read TraceStore.java:40-60
 → 确认无 finally remove()
 → 推理：线程池复用线程，ThreadLocal 值累积
 
@@ -193,7 +235,7 @@ try {
 
 ---
 
-## 规则覆盖 (v5.3.0)
+## 规则覆盖 (v6.0.0)
 
 | 规则 ID | 检测范围 | 引擎 |
 |---------|----------|------|
@@ -212,6 +254,7 @@ try {
 
 ## Version History
 
-- **v5.3.0** (2025-12-26): Added 8 new detection rules (Future.get timeout, Lock leaks, etc.), enhanced knowledge base, and fixed Mutex safety issues.
+- **v6.0.0** (2025-12-26): Pure CLI + Skill mode. Removed MCP dependency for simpler distribution.
+- **v5.3.0** (2025-12-26): Added 8 new detection rules (Future.get timeout, Lock leaks, etc.), enhanced knowledge base.
 - **v5.2.0**: Added AST-based detection (Tree-sitter) for N+1, Nested Loops, ThreadLocal leaks.
 - **v4.0.0**: Initial Rust implementation (Radar-Sniper Architecture).

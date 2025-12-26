@@ -321,6 +321,7 @@ pub fn get_checklist(symptoms: &[&str], priority_filter: Option<&str>, compact: 
 /// 获取所有反模式
 pub fn get_all_antipatterns() -> Result<Value, Box<dyn std::error::Error>> {
     let patterns = vec![
+        // 原有反模式
         ("N+1 Query", "循环内执行数据库查询", "批量查询替代"),
         ("Nested Loop", "嵌套循环导致 O(N*M) 复杂度", "使用 Map/Set 优化"),
         ("ThreadLocal Leak", "ThreadLocal 未调用 remove()", "finally 中 remove()"),
@@ -333,6 +334,25 @@ pub fn get_all_antipatterns() -> Result<Value, Box<dyn std::error::Error>> {
         ("Large Object", "一次性加载大对象 >10MB", "分页/流式处理"),
         ("Blocking IO", "NIO 线程中混入阻塞操作", "异步化处理"),
         ("CAS Spin", "高竞争 Atomic 自旋", "使用 LongAdder"),
+        
+        // v7.0 新增 - Spring
+        ("@Async Default Pool", "@Async 未指定线程池", "配置自定义 Executor"),
+        ("@Scheduled FixedRate", "fixedRate 任务堆积风险", "改用 fixedDelay 或加锁"),
+        ("Field Injection", "@Autowired 字段注入", "改用构造器注入"),
+        
+        // v7.0 新增 - 响应式
+        ("Flux.block()", "响应式中阻塞调用", "使用 subscribeOn 异步"),
+        ("subscribe() No Error", "subscribe() 未处理错误", "添加 error consumer"),
+        ("collectList() OOM", "无界收集可能 OOM", "限制 buffer 或用 window"),
+        
+        // v7.0 新增 - GC
+        ("finalize()", "重写 finalize() 方法", "使用 Cleaner 或 try-finally"),
+        ("String.intern()", "过度使用 intern()", "检查必要性"),
+        ("Large Array", "大数组直接进老年代", "对象池或分块"),
+        
+        // v7.0 新增 - 数据库
+        ("SELECT *", "全字段查询", "明确指定字段"),
+        ("LIKE '%xxx'", "前导通配符全表扫描", "改用全文索引"),
     ];
     
     let mut report = "## ⚠️ 反模式清单\n\n".to_string();

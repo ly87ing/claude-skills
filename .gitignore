@@ -1,4 +1,4 @@
-rust-mcp/target/
+rust/target/
 .DS_Store
 .idea/
 .vscode/

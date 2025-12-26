@@ -1,8 +1,14 @@
 #!/bin/bash
 
 # ============================================
-# Java Perf v5.3.0 (Rust) - 一键安装脚本
+# Java Perf v6.0.0 (Rust) - 手动安装脚本
 # ============================================
+#
+# Plugin 模式：推荐使用 /plugin install java-perf
+# 此脚本用于手动安装（开发或离线场景）
+#
+# 用法:
+#   ./install.sh
 
 set -e
 
@@ -18,10 +24,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════════╗"
-echo "║  Java Perf v5.3.0 (Rust Radar-Sniper)      ║"
-echo "║  零依赖，单二进制                           ║"
+echo "║  Java Perf v6.0.0 (Plugin Mode)           ║"
+echo "║  或使用 /plugin install java-perf          ║"
 echo "╚════════════════════════════════════════════╝"
 echo -e "${NC}"
+echo ""
 
 # 检测平台
 PLATFORM=$(uname -s)
@@ -39,7 +46,7 @@ case "$PLATFORM-$ARCH" in
         ;;
     *)
         echo -e "${RED}❌ 不支持的平台: $PLATFORM-$ARCH${NC}"
-        echo "   请从源码编译: cd rust-mcp && cargo build --release"
+        echo "   请从源码编译: cd rust && cargo build --release"
         exit 1
         ;;
 esac
@@ -52,11 +59,11 @@ mkdir -p "$INSTALL_DIR"
 REPO="ly87ing/java-perf-skill"
 RELEASE_URL="https://github.com/$REPO/releases/latest/download/$BINARY"
 
-echo -e "${YELLOW}[1/3] 下载/编译二进制文件...${NC}"
+echo -e "${YELLOW}[1/2] 安装二进制文件...${NC}"
 
-if [ -f "$SCRIPT_DIR/rust-mcp/target/release/java-perf" ]; then
+if [ -f "$SCRIPT_DIR/rust/target/release/java-perf" ]; then
     # 优先使用本地刚刚编译的
-    cp "$SCRIPT_DIR/rust-mcp/target/release/java-perf" "$INSTALL_DIR/java-perf"
+    cp "$SCRIPT_DIR/rust/target/release/java-perf" "$INSTALL_DIR/java-perf"
     echo -e "${GREEN}✓ 使用本地编译版本${NC}"
 elif [ -f "$SCRIPT_DIR/releases/$BINARY" ]; then
     # 使用本地 release
@@ -72,7 +79,7 @@ elif command -v curl &> /dev/null; then
         # 从源码编译
         if command -v cargo &> /dev/null; then
             echo "  正在编译..."
-            cd "$SCRIPT_DIR/rust-mcp"
+            cd "$SCRIPT_DIR/rust"
             cargo build --release
             cp target/release/java-perf "$INSTALL_DIR/java-perf"
             # 恢复目录
@@ -91,36 +98,18 @@ fi
 chmod +x "$INSTALL_DIR/java-perf"
 echo -e "${GREEN}  路径: $INSTALL_DIR/java-perf${NC}"
 
-# 注册 MCP
-echo ""
-echo -e "${YELLOW}[2/3] 注册 MCP 到 Claude Code...${NC}"
-
-if command -v claude &> /dev/null; then
-    # 清理旧注册
-    claude mcp remove java-perf -s local 2>/dev/null || true
-    claude mcp remove java-perf -s user 2>/dev/null || true
-    claude mcp remove java-perf -s project 2>/dev/null || true
-    sleep 1
-    
-    # 注册新的
-    claude mcp add java-perf --scope user -- "$INSTALL_DIR/java-perf"
-    
-    # 验证
-    sleep 2
-    if claude mcp list 2>&1 | grep -q "java-perf.*Connected"; then
-        echo -e "${GREEN}✓ MCP Server 已注册并验证成功${NC}"
-    else
-        echo -e "${YELLOW}⚠ MCP Server 已注册，可能需要重启 Claude Code${NC}"
-    fi
-else
-    echo -e "${YELLOW}⚠ claude 命令未找到，请手动注册:${NC}"
-    echo -e "   claude mcp add java-perf --scope user -- $INSTALL_DIR/java-perf"
+# 检查 PATH
+if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    echo ""
+    echo -e "${YELLOW}⚠ 请将以下路径添加到 PATH:${NC}"
+    echo -e "   export PATH=\"\$HOME/.local/bin:\$PATH\""
+    echo ""
 fi
 
 # 安装 Skill
 echo ""
-echo -e "${YELLOW}[3/3] 安装 Skill...${NC}"
-SKILL_SOURCE="$SCRIPT_DIR/skill"
+echo -e "${YELLOW}[2/2] 安装 Skill...${NC}"
+SKILL_SOURCE="$SCRIPT_DIR/skills/java-perf"
 SKILL_TARGET="$HOME/.claude/skills/java-perf"
 
 mkdir -p "$HOME/.claude/skills"
@@ -140,6 +129,7 @@ echo "║           ✓ 安装完成！                     ║"
 echo "╚════════════════════════════════════════════╝"
 echo -e "${NC}"
 echo ""
-echo "验证安装："
-echo -e "  ${YELLOW}claude mcp list${NC}"
+echo "使用方式："
+echo -e "  ${YELLOW}java-perf scan --path ./src${NC}    # 扫描项目"
+echo -e "  ${YELLOW}java-perf status${NC}               # 检查引擎状态"
 echo ""

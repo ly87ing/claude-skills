@@ -35,7 +35,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build
-        working-directory: rust-mcp
+        working-directory: rust
         run: |
           cargo build --release --target ${{ matrix.target }}
           cp target/${{ matrix.target }}/release/java-perf ${{ matrix.artifact }}
@@ -44,7 +44,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: rust-mcp/${{ matrix.artifact }}
+          path: rust/${{ matrix.artifact }}
 
   release:
     needs: build
@@ -84,10 +84,8 @@ jobs:
             ```bash
             # 下载
             curl -L https://github.com/${{ github.repository }}/releases/latest/download/java-perf-darwin-arm64 -o ~/.local/bin/java-perf
+            # 直接使用
             chmod +x ~/.local/bin/java-perf
-            
-            # 注册 MCP
-            claude mcp add java-perf --scope user -- ~/.local/bin/java-perf
             ```
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

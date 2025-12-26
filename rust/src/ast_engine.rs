@@ -120,6 +120,82 @@ static RE_DATASOURCE_NO_POOL: Lazy<Regex> = Lazy::new(|| {
 });
 
 // ============================================================================
+// 新增规则 (v7.0) - Spring, 响应式, GC, 数据库
+// ============================================================================
+
+// === Spring 相关 ===
+static RE_TRANSACTIONAL_REQUIRED_NEW: Lazy<Regex> = Lazy::new(|| {
+    // @Transactional(propagation = REQUIRED) 可能导致事务传播问题
+    Regex::new(r"@Transactional\s*\(\s*propagation\s*=\s*Propagation\.REQUIRES_NEW").unwrap()
+});
+static RE_ASYNC_DEFAULT_POOL: Lazy<Regex> = Lazy::new(|| {
+    // @Async 未指定线程池，使用默认 SimpleAsyncTaskExecutor
+    Regex::new(r"@Async\s*\n\s*public").unwrap()
+});
+static RE_CACHEABLE_NO_KEY: Lazy<Regex> = Lazy::new(|| {
+    // @Cacheable 未指定 key，可能导致缓存冲突
+    Regex::new(r"@Cacheable\s*\(\s*[^)]*value\s*=").unwrap()
+});
+static RE_SCHEDULED_FIXED_RATE: Lazy<Regex> = Lazy::new(|| {
+    // @Scheduled(fixedRate) 任务堆积风险
+    Regex::new(r"@Scheduled\s*\(\s*fixedRate").unwrap()
+});
+static RE_AUTOWIRED_FIELD: Lazy<Regex> = Lazy::new(|| {
+    // 字段注入不利于测试，建议构造器注入
+    Regex::new(r"@Autowired\s*\n\s*private").unwrap()
+});
+
+// === 响应式编程 ===
+static RE_FLUX_BLOCK: Lazy<Regex> = Lazy::new(|| {
+    // Flux/Mono.block() 阻塞调用
+    Regex::new(r"\.(block|blockFirst|blockLast)\s*\(").unwrap()
+});
+static RE_SUBSCRIBE_NO_ERROR: Lazy<Regex> = Lazy::new(|| {
+    // subscribe() 未处理 error
+    Regex::new(r"\.subscribe\s*\(\s*[^,)]*\s*\)").unwrap()
+});
+static RE_FLUX_COLLECT_LIST: Lazy<Regex> = Lazy::new(|| {
+    // collectList() 可能导致 OOM
+    Regex::new(r"\.collectList\s*\(\s*\)").unwrap()
+});
+static RE_PARALLEL_NO_RUN_ON: Lazy<Regex> = Lazy::new(|| {
+    // parallel() 未指定 runOn scheduler
+    Regex::new(r"\.parallel\s*\(\s*\)").unwrap()
+});
+
+// === GC 相关 ===
+static RE_LARGE_ARRAY_ALLOC: Lazy<Regex> = Lazy::new(|| {
+    // new byte[1024*1024] 大数组分配
+    Regex::new(r"new\s+(byte|char|int|long)\s*\[\s*\d{6,}").unwrap()
+});
+static RE_FINALIZE_OVERRIDE: Lazy<Regex> = Lazy::new(|| {
+    // 重写 finalize() 方法 (已废弃)
+    Regex::new(r"protected\s+void\s+finalize\s*\(").unwrap()
+});
+static RE_SOFT_REFERENCE: Lazy<Regex> = Lazy::new(|| {
+    // SoftReference 滥用
+    Regex::new(r"new\s+SoftReference\s*<").unwrap()
+});
+static RE_INTERN_STRING: Lazy<Regex> = Lazy::new(|| {
+    // String.intern() 可能导致永久代/元空间溢出
+    Regex::new(r"\.intern\s*\(\s*\)").unwrap()
+});
+
+// === 数据库 ===
+static RE_SELECT_STAR: Lazy<Regex> = Lazy::new(|| {
+    // SELECT * 查询
+    Regex::new(r#"["']SELECT\s+\*\s+FROM"#).unwrap()
+});
+static RE_NO_LIMIT_QUERY: Lazy<Regex> = Lazy::new(|| {
+    // 无 LIMIT 的查询可能返回大量数据
+    Regex::new(r#"["']SELECT\s+[^"']+FROM[^"']+(?!LIMIT)"#).unwrap()
+});
+static RE_LIKE_LEADING_WILDCARD: Lazy<Regex> = Lazy::new(|| {
+    // LIKE '%xxx' 前导通配符导致全表扫描
+    Regex::new(r#"LIKE\s+['"]%"#).unwrap()
+});
+
+// ============================================================================
 // 规则定义
 // ============================================================================
 
@@ -183,6 +259,31 @@ fn get_rules() -> Vec<Rule> {
         Rule { id: "COMPLETABLE_JOIN", description: "CompletableFuture.join() 无超时", severity: Severity::P1, regex: &RE_COMPLETABLE_JOIN },
         Rule { id: "LOG_STRING_CONCAT", description: "日志字符串拼接 (应用占位符)", severity: Severity::P1, regex: &RE_LOG_STRING_CONCAT },
         Rule { id: "DATASOURCE_NO_POOL", description: "DriverManager 直接获取连接 (无连接池)", severity: Severity::P1, regex: &RE_DATASOURCE_NO_POOL },
+        
+        // ====== v7.0 新增规则 ======
+        
+        // Spring 相关 (P1)
+        Rule { id: "TRANSACTIONAL_REQUIRES_NEW", description: "@Transactional(REQUIRES_NEW) 事务嵌套风险", severity: Severity::P1, regex: &RE_TRANSACTIONAL_REQUIRED_NEW },
+        Rule { id: "ASYNC_DEFAULT_POOL", description: "@Async 未指定线程池，使用默认 SimpleAsyncTaskExecutor", severity: Severity::P1, regex: &RE_ASYNC_DEFAULT_POOL },
+        Rule { id: "CACHEABLE_NO_KEY", description: "@Cacheable 未指定 key，可能导致缓存冲突", severity: Severity::P1, regex: &RE_CACHEABLE_NO_KEY },
+        Rule { id: "SCHEDULED_FIXED_RATE", description: "@Scheduled(fixedRate) 任务堆积风险", severity: Severity::P1, regex: &RE_SCHEDULED_FIXED_RATE },
+        Rule { id: "AUTOWIRED_FIELD", description: "字段注入不利于测试，建议构造器注入", severity: Severity::P1, regex: &RE_AUTOWIRED_FIELD },
+        
+        // 响应式编程 (P0/P1)
+        Rule { id: "FLUX_BLOCK", description: "Flux/Mono.block() 阻塞调用，可能死锁", severity: Severity::P0, regex: &RE_FLUX_BLOCK },
+        Rule { id: "SUBSCRIBE_NO_ERROR", description: "subscribe() 未处理 error，异常会被吞没", severity: Severity::P1, regex: &RE_SUBSCRIBE_NO_ERROR },
+        Rule { id: "FLUX_COLLECT_LIST", description: "collectList() 可能导致 OOM", severity: Severity::P1, regex: &RE_FLUX_COLLECT_LIST },
+        Rule { id: "PARALLEL_NO_RUN_ON", description: "parallel() 未指定 runOn scheduler", severity: Severity::P1, regex: &RE_PARALLEL_NO_RUN_ON },
+        
+        // GC 相关 (P1)
+        Rule { id: "LARGE_ARRAY_ALLOC", description: "大数组分配，可能触发 Full GC", severity: Severity::P1, regex: &RE_LARGE_ARRAY_ALLOC },
+        Rule { id: "FINALIZE_OVERRIDE", description: "重写 finalize() 方法 (已废弃，影响 GC)", severity: Severity::P0, regex: &RE_FINALIZE_OVERRIDE },
+        Rule { id: "SOFT_REFERENCE_MISUSE", description: "SoftReference 滥用可能导致内存问题", severity: Severity::P1, regex: &RE_SOFT_REFERENCE },
+        Rule { id: "STRING_INTERN", description: "String.intern() 可能导致元空间溢出", severity: Severity::P1, regex: &RE_INTERN_STRING },
+        
+        // 数据库 (P1)
+        Rule { id: "SELECT_STAR", description: "SELECT * 查询，建议明确指定字段", severity: Severity::P1, regex: &RE_SELECT_STAR },
+        Rule { id: "LIKE_LEADING_WILDCARD", description: "LIKE '%xxx' 前导通配符导致全表扫描", severity: Severity::P0, regex: &RE_LIKE_LEADING_WILDCARD },
     ]
 }
 
