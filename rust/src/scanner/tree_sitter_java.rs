@@ -2,6 +2,8 @@ use super::{CodeAnalyzer, Issue, Severity};
 use std::path::Path;
 use anyhow::{Result, anyhow};
 use tree_sitter::{Parser, Query, QueryCursor};
+use crate::symbol_table::{TypeInfo, VarBinding}; // Import TypeInfo
+use crate::symbol_table::SymbolTable;
 
 /// 预编译的规则
 struct CompiledRule {
@@ -15,6 +17,8 @@ pub struct JavaTreeSitterAnalyzer {
     language: tree_sitter::Language,
     /// 预编译的查询 (在 new() 时编译一次)
     compiled_rules: Vec<CompiledRule>,
+    /// 结构提取查询 (用于 Phase 1)
+    structure_query: Query,
 }
 
 impl JavaTreeSitterAnalyzer {
@@ -23,10 +27,12 @@ impl JavaTreeSitterAnalyzer {
         
         // 预编译所有查询
         let compiled_rules = Self::compile_rules(&language)?;
+        let structure_query = Self::compile_structure_query(&language)?; // 新增结构化查询
         
         Ok(Self {
             language,
             compiled_rules,
+            structure_query,
         })
     }
 
@@ -506,6 +512,26 @@ impl JavaTreeSitterAnalyzer {
         
         Ok(compiled)
     }
+
+    /// 编译结构化查询 (Phase 1)
+    fn compile_structure_query(language: &tree_sitter::Language) -> Result<Query> {
+        let query_str = r#"
+            (class_declaration 
+                name: (identifier) @class_name
+                (modifiers (marker_annotation name: (identifier) @class_ann))?
+            )
+            (interface_declaration 
+                name: (identifier) @iface_name
+                (modifiers (marker_annotation name: (identifier) @iface_ann))?
+            )
+            (field_declaration
+                (modifiers (marker_annotation name: (identifier) @field_ann))?
+                type: (_) @field_type
+                declarator: (variable_declarator name: (identifier) @field_name)
+            )
+        "#;
+        Query::new(language, query_str).map_err(|e| anyhow!("Failed to compile structure query: {e}"))
+    }
 }
 
 impl CodeAnalyzer for JavaTreeSitterAnalyzer {
@@ -514,12 +540,90 @@ impl CodeAnalyzer for JavaTreeSitterAnalyzer {
     }
 
     fn analyze(&self, code: &str, file_path: &Path) -> Result<Vec<Issue>> {
+        // Default analyze implementation for trait (single pass fallback)
+        self.analyze_with_context(code, file_path, None)
+    }
+}
+
+impl JavaTreeSitterAnalyzer {
+    /// Phase 1: 提取符号信息
+    pub fn extract_symbols(&self, code: &str, file_path: &Path) -> Result<(Option<TypeInfo>, Vec<VarBinding>)> {
+        let mut parser = Parser::new();
+        parser.set_language(&self.language).map_err(|e| anyhow!("Failed to set language: {e}"))?;
+        let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
+        
+        let mut query_cursor = QueryCursor::new();
+        let matches = query_cursor.matches(&self.structure_query, tree.root_node(), code.as_bytes());
+
+        let mut type_info: Option<TypeInfo> = None;
+        let mut bindings = Vec::new();
+        
+
+        for m in matches {
+            // Class/Interface Declaration
+            if let Some(idx) = self.structure_query.capture_index_for_name("class_name")
+                .or_else(|| self.structure_query.capture_index_for_name("iface_name")) {
+                
+                for capture in m.captures {
+                    if capture.index == idx {
+                        let name = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
+                        if type_info.is_none() {
+                            type_info = Some(TypeInfo::new(&name, file_path.to_path_buf(), capture.node.start_position().row + 1));
+                        }
+                    }
+                }
+            }
+            
+            // Annotations (Add to TypeInfo)
+            if let Some(idx) = self.structure_query.capture_index_for_name("class_ann")
+                .or_else(|| self.structure_query.capture_index_for_name("iface_ann")) {
+                 for capture in m.captures {
+                    if capture.index == idx {
+                        let ann = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
+                        if let Some(info) = &mut type_info {
+                            info.add_annotation(&ann);
+                        }
+                    }
+                 }
+            }
+
+            // Fields
+            let field_name_idx = self.structure_query.capture_index_for_name("field_name");
+            let field_type_idx = self.structure_query.capture_index_for_name("field_type");
+            
+            if field_name_idx.is_some() && field_type_idx.is_some() {
+                 let mut f_name = String::new();
+                 let mut f_type = String::new();
+                 
+                 for capture in m.captures {
+                     if capture.index == field_name_idx.unwrap() {
+                         f_name = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
+                     }
+                     if capture.index == field_type_idx.unwrap() {
+                         f_type = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
+                     }
+                 }
+                 
+                 if !f_name.is_empty() {
+                     bindings.push(VarBinding::new(&f_name, &f_type, true));
+                 }
+            }
+        }
+
+        Ok((type_info, bindings))
+    }
+
+    /// Phase 2: 深度分析 (带上下文)
+    pub fn analyze_with_context(&self, code: &str, file_path: &Path, ctx: Option<&SymbolTable>) -> Result<Vec<Issue>> {
         let mut parser = Parser::new();
         parser.set_language(&self.language).map_err(|e| anyhow!("Failed to set language: {e}"))?;
 
         let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
         let root_node = tree.root_node();
         let mut issues = Vec::new();
+
+        // 获取当前类名 (用于 is_dao_call 上下文)
+        let current_class_name = file_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
 
         // 使用预编译的查询 (不再每次编译)
         for rule in &self.compiled_rules {
@@ -535,6 +639,10 @@ impl CodeAnalyzer for JavaTreeSitterAnalyzer {
                         let mut method_name_text = String::new();
                         let mut line = 0;
                         
+                        // 尝试获取调用对象变量名 (虽然 query 中没显式 capture object，但可以通过 AST 遍历获取)
+                         // 这是一个简化，理想情况需要在 query 里加 @object capture。
+                         // 这里我们先用旧逻辑，然后用 ctx 增强。
+                        
                         for capture in m.captures {
                             if capture.index == method_name_idx {
                                 method_name_text = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
@@ -543,17 +651,47 @@ impl CodeAnalyzer for JavaTreeSitterAnalyzer {
                                 line = capture.node.start_position().row + 1;
                             }
                         }
+                        
+                        let mut is_suspicious = false;
+                        
+                        // 1. 尝试获取 receiver (variable name)
+                        // AST 结构: (method_invocation object: (identifier) @obj ...)
+                        // 由于 query 没捕获 object，我们需要手动从 method_invocation node 找
+                        let mut receiver_name = String::new();
+                         if let Some(call_node) = m.captures.iter().find(|c| c.index == call_idx).map(|c| c.node) {
+                             if let Some(obj_node) = call_node.child_by_field_name("object") {
+                                 receiver_name = obj_node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
+                             }
+                         }
 
-                        // 检查是否是 DAO/RPC 方法名
-                        if method_name_text.contains("find") || 
-                           method_name_text.contains("save") || 
-                           method_name_text.contains("select") || 
-                           method_name_text.contains("delete") ||
-                           method_name_text.contains("get") ||
-                           method_name_text.contains("query") ||
-                           method_name_text.contains("load") ||
-                           method_name_text.contains("fetch") {
-                            
+                         if let Some(symbol_table) = ctx {
+                            // === Semantic Mode ===
+                            if !receiver_name.is_empty() {
+                                if symbol_table.is_dao_call(&current_class_name, &receiver_name, &method_name_text) {
+                                    is_suspicious = true;
+                                }
+                            } else {
+                                // 如果没有 receiver (this.call), 或者是复杂表达式，暂时忽略或用硬编码
+                                // 对于 N+1，通常是 repo.findAll()
+                                if method_name_text.contains("find") || method_name_text.contains("save") {
+                                     is_suspicious = true; // Fallback
+                                }
+                            }
+                        } else {
+                            // === Heuristic Mode (Legacy) ===
+                            if method_name_text.contains("find") || 
+                               method_name_text.contains("save") || 
+                               method_name_text.contains("select") || 
+                               method_name_text.contains("delete") || 
+                               method_name_text.contains("get") || 
+                               method_name_text.contains("query") || 
+                               method_name_text.contains("load") || 
+                               method_name_text.contains("fetch") {
+                                is_suspicious = true;
+                            }
+                        }
+
+                        if is_suspicious {
                             let file_name = file_path.file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_else(|| "unknown".to_string());

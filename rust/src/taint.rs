@@ -2,6 +2,8 @@
 // 污点分析模块 - 跨文件调用链追踪
 // ============================================================================
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use serde::{Serialize, Deserialize};

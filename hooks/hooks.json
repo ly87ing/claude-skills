@@ -4,6 +4,10 @@
             {
                 "type": "command",
                 "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/install-binary.sh"
+            },
+            {
+                "type": "command",
+                "command": "java-perf summary . --json"
             }
         ]
     }

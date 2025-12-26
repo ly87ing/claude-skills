@@ -1,6 +1,6 @@
 [package]
 name = "java-perf"
-version = "7.0.0"
+version = "8.0.0"
 edition = "2021"
 authors = ["ly87ing"]
 description = "Java Performance Diagnostics Tool - Radar-Sniper Architecture"
@@ -43,3 +43,4 @@ panic = "abort"
 
 [dev-dependencies]
 insta = { version = "1.34", features = ["json"] }
+tempfile = "3.8"

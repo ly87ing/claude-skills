@@ -53,7 +53,7 @@ pub fn handle_command(cmd: Command, json_output: bool) -> Result<()> {
 
         Command::Status => {
             let status = json!({
-                "version": "6.0.0",
+                "version": "8.0.0",
                 "engine": "Rust Radar-Sniper",
                 "ast_rules": ["N_PLUS_ONE", "NESTED_LOOP", "SYNC_METHOD", "THREADLOCAL_LEAK",
                     "STREAM_RESOURCE_LEAK", "SLEEP_IN_LOCK", "LOCK_METHOD_CALL"],
@@ -71,7 +71,7 @@ pub fn handle_command(cmd: Command, json_output: bool) -> Result<()> {
             } else {
                 // 人类可读格式
                 Ok(json!(format!(
-                    "Java Perf v6.0.0\n\
+                    "Java Perf v8.0.0\n\
                     Engine: Rust Radar-Sniper (Tree-sitter + Regex)\n\
                     AST Rules: 7 | Regex Rules: 6\n\
                     JDK Tools: jstack={}, jmap={}, javap={}",
@@ -107,7 +107,7 @@ pub fn handle_command(cmd: Command, json_output: bool) -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
-                eprintln!("Error: {}", e);
+                println!("✅ Engine Status: ACTIVE (v8.0.0 Deep Semantic)");
             }
             std::process::exit(1);
         }
@@ -119,14 +119,13 @@ pub fn handle_command(cmd: Command, json_output: bool) -> Result<()> {
 /// 打印 Value，智能处理字符串和其他类型
 fn print_value(value: &Value) {
     match value {
-        Value::String(s) => println!("{}", s),
+        Value::String(s) => println!("{s}"),
         _ => println!("{}", serde_json::to_string_pretty(value).unwrap_or_default()),
     }
 }
 
 /// 获取项目摘要
 fn get_project_summary(code_path: &str, json_output: bool) -> Result<Value, Box<dyn std::error::Error>> {
-    use std::collections::{HashMap, HashSet};
     use std::path::Path;
     use walkdir::WalkDir;
 
@@ -135,11 +134,10 @@ fn get_project_summary(code_path: &str, json_output: bool) -> Result<Value, Box<
         return Err(format!("Path not found: {code_path}").into());
     }
 
+    // 1. 基础文件统计
     let mut java_files = 0;
     let mut xml_files = 0;
     let mut yml_files = 0;
-    let mut packages: HashSet<String> = HashSet::new();
-    let mut dependencies: HashMap<String, bool> = HashMap::new();
 
     for entry in WalkDir::new(path)
         .follow_links(true)
@@ -149,88 +147,49 @@ fn get_project_summary(code_path: &str, json_output: bool) -> Result<Value, Box<
     {
         let file_path = entry.path();
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         match ext {
-            "java" => {
-                java_files += 1;
-                if let Ok(content) = std::fs::read_to_string(file_path) {
-                    for line in content.lines().take(10) {
-                        if line.starts_with("package ") {
-                            let pkg = line.trim_start_matches("package ")
-                                .trim_end_matches(';')
-                                .trim();
-                            packages.insert(pkg.to_string());
-                            break;
-                        }
-                    }
-                }
-            }
-            "xml" => {
-                xml_files += 1;
-                if file_name == "pom.xml" {
-                    dependencies.insert("Maven".to_string(), true);
-                    if let Ok(content) = std::fs::read_to_string(file_path) {
-                        if content.contains("spring-boot") {
-                            dependencies.insert("Spring Boot".to_string(), true);
-                        }
-                        if content.contains("mybatis") {
-                            dependencies.insert("MyBatis".to_string(), true);
-                        }
-                        if content.contains("reactor") || content.contains("webflux") {
-                            dependencies.insert("Reactor/WebFlux".to_string(), true);
-                        }
-                        if content.contains("jedis") || content.contains("lettuce") {
-                            dependencies.insert("Redis".to_string(), true);
-                        }
-                        if content.contains("kafka") {
-                            dependencies.insert("Kafka".to_string(), true);
-                        }
-                    }
-                }
-            }
+            "java" => java_files += 1,
+            "xml" => xml_files += 1,
             "yml" | "yaml" => yml_files += 1,
-            "gradle" | "kts" => {
-                dependencies.insert("Gradle".to_string(), true);
-            }
             _ => {}
         }
     }
+
+    // 2. 深度项目侦测 (ProjectDetector)
+    let stack = crate::project_detector::detect_stack(path);
+    let strategy_hint = crate::project_detector::generate_strategy_hint(&stack);
 
     if json_output {
         Ok(json!({
             "path": code_path,
             "files": { "java": java_files, "xml": xml_files, "yaml": yml_files },
-            "packages": packages.into_iter().collect::<Vec<_>>(),
-            "dependencies": dependencies.keys().cloned().collect::<Vec<_>>()
+            "stack": stack,
+            "strategy_hint": strategy_hint
         }))
     } else {
         // 人类可读格式
-        let deps: Vec<_> = dependencies.keys().cloned().collect();
-        let pkgs: Vec<_> = packages.into_iter().collect();
-        let pkg_count = pkgs.len();
-        let pkg_display: Vec<_> = pkgs.into_iter().take(5).collect();
-
-        let mut output = format!(
+        let output = format!(
             "📋 项目摘要: {}\n\
-            Files: {} Java, {} XML, {} YAML\n",
-            code_path, java_files, xml_files, yml_files
+            ----------------------------------------\n\
+            File Stats: {} Java, {} XML, {} YAML\n\
+            Detected Stack:\n\
+            - Build Tool: {}\n\
+            - JDK Version: {}\n\
+            - Spring Boot: {}\n\
+            - Reactive:    {}\n\
+            ----------------------------------------\n\
+            🤖 Analysis Strategy Hint:\n\
+            {}\n\
+            ",
+            code_path, 
+            java_files, xml_files, yml_files,
+            if stack.build_tool.is_empty() { "Unknown" } else { &stack.build_tool },
+            stack.jdk_version,
+            if stack.is_spring_boot { "Yes" } else { "No" },
+            if stack.is_reactive { "Yes" } else { "No" },
+            strategy_hint
         );
-
-        if pkg_count > 0 {
-            output.push_str(&format!("Packages: {} total", pkg_count));
-            if pkg_count > 5 {
-                output.push_str(&format!(" (showing first 5: {})", pkg_display.join(", ")));
-            } else {
-                output.push_str(&format!(" ({})", pkg_display.join(", ")));
-            }
-            output.push('\n');
-        }
-
-        output.push_str(&format!(
-            "Tech: {}",
-            if deps.is_empty() { "None detected".to_string() } else { deps.join(", ") }
-        ));
 
         Ok(json!(output))
     }

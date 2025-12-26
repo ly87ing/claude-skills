@@ -75,6 +75,10 @@ java-perf antipatterns
 - 输出时引用标准修复方案
 - 确保检查项覆盖完整
 
+> [!CRITICAL]
+> **Strategy Follow-up**:
+> Session 启动时Hook会自动运行 `java-perf summary`。你必须**优先阅读该命令的输出**。如果其中包含 **"Strategy Hint"** (例如 "WebFlux project detected, check for blocking calls")，你必须**调整分析重点**以符合该策略。不要忽略项目特定的上下文提示！
+
 ---
 
 ## Phase 1: 🛰️ 雷达扫描 (0 Token)
@@ -235,7 +239,7 @@ try {
 
 ---
 
-## 规则覆盖 (v6.0.0)
+## 规则覆盖 (v8.0.0)
 
 | 规则 ID | 检测范围 | 引擎 |
 |---------|----------|------|
@@ -254,6 +258,7 @@ try {
 
 ## Version History
 
+- **v8.0.0** (2025-12-26): **Deep Semantic Engine**. Introduced Two-Pass architecture (Indexing -> Analysis) for accurate N+1 detection. Added Dynamic Skill Strategy based on project stack detection.
 - **v6.0.0** (2025-12-26): Pure CLI + Skill mode. Removed MCP dependency for simpler distribution.
 - **v5.3.0** (2025-12-26): Added 8 new detection rules (Future.get timeout, Lock leaks, etc.), enhanced knowledge base.
 - **v5.2.0**: Added AST-based detection (Tree-sitter) for N+1, Nested Loops, ThreadLocal leaks.

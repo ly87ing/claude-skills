@@ -302,12 +302,13 @@ fn convert_issue(issue: ScannerIssue) -> AstIssue {
 // 核心扫描函数
 // ============================================================================
 
-/// 全项目雷达扫描 (v5.1 并行版本)
+/// 全项目雷达扫描 (v8.0 双遍架构)
 /// 
 /// compact: true 时只返回 P0，每个 issue 只有 id/file/line
 /// max_p1: compact=false 时最多返回的 P1 数量
 pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value, Box<dyn std::error::Error>> {
     let path = Path::new(code_path);
+    let is_dir = path.is_dir();
     
     // 收集所有待扫描文件
     let entries: Vec<_> = WalkDir::new(path)
@@ -319,11 +320,61 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
 
     let file_count = entries.len();
 
+    // 初始化分析器 (Arc 共享，只编译一次 queries)
+    let java_analyzer = std::sync::Arc::new(JavaTreeSitterAnalyzer::new()?);
+    let config_analyzer = LineBasedConfigAnalyzer::new().ok();
+    let docker_analyzer = DockerfileAnalyzer::new().ok();
+
+    // === Phase 1: Indexing (构建全局符号表) ===
+    let mut symbol_table = crate::symbol_table::SymbolTable::new();
+    
+    // 只有目录扫描且包含 Java 文件时才进行索引构建
+    if is_dir {
+        // 使用并行迭代器进行索引
+        // 注意：由于 SymbolTable 需要合并，我们使用 map/reduce
+        let java_files: Vec<_> = entries.iter()
+            .filter(|e| e.path().extension().and_then(|e| e.to_str()) == Some("java"))
+            .collect();
+            
+        if !java_files.is_empty() {
+            // Log indexing (optional)
+            // println!("Phase 1: Indexing {} Java files...", java_files.len());
+            
+            let tables: Vec<crate::symbol_table::SymbolTable> = java_files.par_iter().map(|entry| {
+                let mut local_table = crate::symbol_table::SymbolTable::new();
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    if let Ok((Some(type_info), bindings)) = java_analyzer.extract_symbols(&content, entry.path()) {
+                        // 注册类和字段
+                        let class_name = type_info.name.clone();
+                        local_table.register_class(type_info);
+                        for binding in bindings {
+                            local_table.register_field(&class_name, binding);
+                        }
+                    }
+                }
+                local_table
+            }).collect();
+            
+            // Merge all tables
+            for table in tables {
+                for (name, info) in table.classes {
+                    symbol_table.classes.insert(name, info);
+                }
+                for (key, binding) in table.fields {
+                    symbol_table.fields.insert(key, binding);
+                }
+                for (key, info) in table.methods {
+                    symbol_table.methods.insert(key, info);
+                }
+            }
+        }
+    }
+    
+    let symbol_table_ref = &symbol_table;
+
+    // === Phase 2: Deep Analysis (深度扫描) ===
     // 使用 Mutex 保护共享状态 (rayon 并行安全)
     let issues: Mutex<Vec<AstIssue>> = Mutex::new(Vec::new());
-
-    // 预初始化分析器 (在并行前创建，每个线程克隆使用或按需创建)
-    // 注意：由于 Tree-sitter 的 Query 不是 Send，我们在每个线程内创建分析器
 
     // 并行处理文件
     entries.par_iter().for_each(|entry| {
@@ -338,21 +389,22 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
 
         if ext == "java" {
             if let Ok(content) = std::fs::read_to_string(file_path) {
-                // 1. Regex Analysis (Legacy)
+                // 1. Regex Analysis (Legacy - still useful for some non-AST rules)
                 let legacy = analyze_java_code(&content, &file_path.to_string_lossy());
                 local_issues.extend(legacy);
 
-                // 2. AST Analysis
-                if let Ok(analyzer) = JavaTreeSitterAnalyzer::new() {
-                    if let Ok(ast_results) = analyzer.analyze(&content, file_path) {
-                        local_issues.extend(ast_results.into_iter().map(convert_issue));
-                    }
+                // 2. AST Analysis (with Context)
+                // 传入全局 SymbolTable 引用
+                let ctx = if is_dir { Some(symbol_table_ref) } else { None };
+                
+                if let Ok(ast_results) = java_analyzer.analyze_with_context(&content, file_path, ctx) {
+                    local_issues.extend(ast_results.into_iter().map(convert_issue));
                 }
             }
         } else if ["yml", "yaml", "properties"].contains(&ext) {
             if let Ok(content) = std::fs::read_to_string(file_path) {
                 // 3. Config Analysis
-                if let Ok(analyzer) = LineBasedConfigAnalyzer::new() {
+                if let Some(analyzer) = &config_analyzer {
                     if let Ok(config_results) = analyzer.analyze(&content, file_path) {
                         local_issues.extend(config_results.into_iter().map(convert_issue));
                     }
@@ -361,7 +413,7 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
         } else if file_name_str == "Dockerfile" || file_name_str.starts_with("Dockerfile.") {
             if let Ok(content) = std::fs::read_to_string(file_path) {
                 // 4. Dockerfile Analysis (v5.1 NEW)
-                if let Ok(analyzer) = DockerfileAnalyzer::new() {
+                if let Some(analyzer) = &docker_analyzer {
                     if let Ok(docker_results) = analyzer.analyze(&content, file_path) {
                         local_issues.extend(docker_results.into_iter().map(convert_issue));
                     }
@@ -386,7 +438,7 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
     if compact {
         // 紧凑模式：只返回 P0，精简格式
         let mut report = format!(
-            "## 🛰️ 雷达扫描 (v5.1 并行)\n\n**P0**: {p0_count} | **P1**: {p1_count} | **文件**: {file_count}\n\n"
+            "## 🛰️ 雷达扫描 (v8.0 双遍引擎)\n\n**P0**: {p0_count} | **P1**: {p1_count} | **文件**: {file_count}\n\n"
         );
 
         if p0_count > 0 {
@@ -408,7 +460,7 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
     } else {
         // 完整模式
         let mut report = format!(
-            "## 🛰️ 雷达扫描结果 (v5.1 并行 + Dockerfile)\n\n\
+            "## 🛰️ 雷达扫描结果 (v8.0 双遍引擎)\n\n\
             **扫描**: {} 个文件\n\
             **发现**: {} 个嫌疑点 (P0: {}, P1: {})\n\n",
             file_count, issues.len(), p0_count, p1_count

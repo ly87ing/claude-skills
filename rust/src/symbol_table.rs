@@ -28,10 +28,6 @@ impl LayerType {
         }
     }
     
-    /// 判断是否可能进行 DB/RPC 操作
-    pub fn is_io_layer(&self) -> bool {
-        matches!(self, LayerType::Repository)
-    }
 }
 
 /// 类型信息
@@ -133,11 +129,6 @@ impl SymbolTable {
     /// 注册字段
     pub fn register_field(&mut self, class: &str, binding: VarBinding) {
         self.fields.insert((class.to_string(), binding.name.clone()), binding);
-    }
-    
-    /// 注册方法
-    pub fn register_method(&mut self, info: MethodInfo) {
-        self.methods.insert((info.class.clone(), info.name.clone()), info);
     }
     
     /// 查询变量的类型信息

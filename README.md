@@ -1,13 +1,19 @@
-# Java Perf v7.0.0 (Rust)
+# Java Perf v8.0.0 (Rust)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-7.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/Version-8.0.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Language-Rust-orange" alt="Rust">
   <img src="https://img.shields.io/badge/Size-1.9MB-green" alt="Binary Size">
   <img src="https://img.shields.io/badge/Dependencies-Zero-purple" alt="No Dependencies">
 </p>
 
-A Claude Code Plugin for diagnosing Java performance issues using the **Radar-Sniper Architecture v2**.
+A Claude Code Plugin for diagnosing Java performance issues using the **v8.0 Deep Semantic Engine**.
+
+**Features**:
+*   **Two-Pass Architecture**: Phase 1 Indexing + Phase 2 Semantic Analysis.
+*   **Context-Aware**: Distinguishes DAO calls from generic methods (no more false positives).
+*   **Project Detector**: Auto-detects Spring Boot/WebFlux/JDK version and configures analysis strategy.
+*   **Zero Dependencies**: Single Rust binary, no JVM required for analysis.
 
 **Standard Plugin Structure - Marketplace Ready!**
 
@@ -17,11 +23,11 @@ A Claude Code Plugin for diagnosing Java performance issues using the **Radar-Sn
 Phase 0: 🧠 Knowledge Preload
 └── java-perf checklist --symptoms memory
 
-Phase 1: 🛰️ Radar (Zero Cost)
+Phase 1: 🛰️ Radar (Two-Pass Semantic)
 └── java-perf scan --path ./
-    ├── Tree-sitter AST (N+1, Nested Loops, ThreadLocal)
-    ├── Static Regex Compilation
-    └── 20+ Performance Rules (P0/P1)
+    ├── Pass 1: Symbol Indexing (Classes, Fields, Annotations)
+    ├── Pass 2: Context-Aware AST Analysis
+    └── 30+ Performance Rules (P0/P1)
 
 Phase 2: 🎯 Sniper (LLM Verification)
 └── Read source + LSP navigation
