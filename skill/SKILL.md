@@ -1,6 +1,7 @@
 ---
 name: java-perf
-description: Diagnoses Java performance issues. 触发词：性能问题, 分析性能, 性能排查, 性能分析, 性能优化, 响应慢, CPU高, 内存暴涨, 内存溢出, OOM, GC频繁, 连接池满, 线程池满, 超时, 消息积压, 卡顿, 延迟高, 占用高. Keywords: performance issue, slow response, high CPU, memory spike, GC pressure, resource exhaustion, troubleshoot performance.
+description: Diagnoses Java performance issues using AST analysis and LSP reasoning. Identifies N+1 queries, memory leaks, lock contention, and concurrency risks. Use when users mention "slow response", "high CPU", "memory leak", "OOM", "deadlock", or generic performance problems.
+allowed-tools: mcp__java-perf__radar_scan, mcp__java-perf__scan_source_code, mcp__java-perf__analyze_log, mcp__java-perf__analyze_thread_dump, mcp__java-perf__analyze_heap, mcp__java-perf__analyze_bytecode, mcp__java-perf__get_checklist, mcp__java-perf__get_all_antipatterns, mcp__java-perf__get_engine_status, mcp__cclsp__find_symbol, mcp__cclsp__find_definition, view_file
 ---
 
 # Java Performance Expert (Radar-Sniper Protocol v2)
@@ -192,7 +193,7 @@ try {
 
 ---
 
-## 规则覆盖 (v5.2)
+## 规则覆盖 (v5.3.0)
 
 | 规则 ID | 检测范围 | 引擎 |
 |---------|----------|------|
@@ -201,6 +202,16 @@ try {
 | SYNC_METHOD | synchronized 方法级锁 | AST |
 | THREADLOCAL_LEAK | ThreadLocal.set() 无配对 remove() | AST |
 | STREAM_RESOURCE_LEAK | try 块内创建流资源 | AST |
+| SLEEP_IN_LOCK | synchronized 块内 Thread.sleep() | AST |
+| LOCK_METHOD_CALL | ReentrantLock.lock() 无配对 unlock() | AST |
 | UNBOUNDED_POOL | Executors.newCachedThreadPool | Regex |
 | UNBOUNDED_CACHE | static Map 无 TTL | Regex |
+| REENTRANT_LOCK_RISK | ReentrantLock 定义检查 | Regex |
+| FUTURE_GET_NO_TIMEOUT | Future.get() 无超时 | Regex |
 | ... | 更多规则见 `get_all_antipatterns()` | - |
+
+## Version History
+
+- **v5.3.0** (2025-12-26): Added 8 new detection rules (Future.get timeout, Lock leaks, etc.), enhanced knowledge base, and fixed Mutex safety issues.
+- **v5.2.0**: Added AST-based detection (Tree-sitter) for N+1, Nested Loops, ThreadLocal leaks.
+- **v4.0.0**: Initial Rust implementation (Radar-Sniper Architecture).
