@@ -14,20 +14,17 @@ description: Diagnoses Java performance issues. 触发词：性能问题, 分析
 > [!IMPORTANT]
 > **必须先执行雷达扫描**，不要直接搜索文件或使用 grep
 
+**首选：全项目扫描**
+```
+mcp__java-perf__radar_scan({ codePath: "./" })
+```
+返回：全项目嫌疑点列表（P0/P1 分类）
+
+**备选：单文件扫描**
 ```
 mcp__java-perf__scan_source_code({
   code: "文件内容",
   filePath: "xxx.java"
-})
-```
-
-**输出**：嫌疑点列表（文件:行号 + 类型）
-
-**全局扫描**（推荐）：
-```
-mcp__java-perf__java_perf_investigation({
-  codePath: "./",
-  symptoms: ["memory", "cpu"]
 })
 ```
 
