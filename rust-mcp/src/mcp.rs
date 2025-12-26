@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use crate::{ast_engine, forensic, jdk_engine};
+use crate::{ast_engine, forensic, jdk_engine, checklist};
 
 /// JSON-RPC 请求
 #[derive(Debug, Deserialize)]
@@ -34,6 +34,33 @@ struct JsonRpcError {
 fn get_tools() -> Value {
     json!({
         "tools": [
+            {
+                "name": "get_checklist",
+                "description": "❓ 检查清单 - 根据症状返回检查项",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "symptoms": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "症状列表: memory, cpu, slow, resource, backlog, gc"
+                        },
+                        "priorityFilter": {
+                            "type": "string",
+                            "description": "优先级过滤: all, P0, P1, P2"
+                        }
+                    },
+                    "required": ["symptoms"]
+                }
+            },
+            {
+                "name": "get_all_antipatterns",
+                "description": "⚠️ 反模式清单 - 所有性能反模式",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
             {
                 "name": "radar_scan",
                 "description": "🛰️ 雷达扫描 - 全项目 AST 分析，返回嫌疑点列表 (P0/P1)",
@@ -192,6 +219,18 @@ fn handle_tool_call(params: &Option<Value>) -> Result<Value, Box<dyn std::error:
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
     
     let result = match tool_name {
+        "get_checklist" => {
+            let symptoms: Vec<&str> = arguments.get("symptoms")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            let priority = arguments.get("priorityFilter")
+                .and_then(|v| v.as_str());
+            checklist::get_checklist(&symptoms, priority)
+        },
+        "get_all_antipatterns" => {
+            checklist::get_all_antipatterns()
+        },
         "radar_scan" => {
             let code_path = arguments.get("codePath")
                 .and_then(|v| v.as_str())

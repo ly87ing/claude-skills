@@ -9,6 +9,7 @@ mod mcp;
 mod ast_engine;
 mod forensic;
 mod jdk_engine;
+mod checklist;
 
 use std::io::{self, BufRead, Write};
 use tracing::{info, error, Level};
