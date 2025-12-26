@@ -1,0 +1,91 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: java-perf-darwin-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: java-perf-darwin-arm64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: java-perf-linux-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        working-directory: rust-mcp
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/java-perf ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: rust-mcp/${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/java-perf-darwin-x64/java-perf-darwin-x64
+            artifacts/java-perf-darwin-arm64/java-perf-darwin-arm64
+            artifacts/java-perf-linux-x64/java-perf-linux-x64
+          body: |
+            ## Java Perf v4.0.0 (Rust)
+            
+            零依赖，单二进制。
+            
+            ### 下载
+            
+            | 平台 | 文件 |
+            |------|------|
+            | macOS (Apple Silicon) | `java-perf-darwin-arm64` |
+            | macOS (Intel) | `java-perf-darwin-x64` |
+            | Linux (x64) | `java-perf-linux-x64` |
+            
+            ### 安装
+            
+            ```bash
+            # 下载
+            curl -L https://github.com/${{ github.repository }}/releases/latest/download/java-perf-darwin-arm64 -o ~/.local/bin/java-perf
+            chmod +x ~/.local/bin/java-perf
+            
+            # 注册 MCP
+            claude mcp add java-perf --scope user -- ~/.local/bin/java-perf
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

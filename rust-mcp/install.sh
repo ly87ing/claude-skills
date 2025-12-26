@@ -48,8 +48,9 @@ esac
 INSTALL_DIR="$HOME/.local/bin"
 mkdir -p "$INSTALL_DIR"
 
-# 检查是否有预编译二进制
-RELEASE_URL="https://github.com/ly87ing/java-perf-skill/releases/latest/download/$BINARY"
+# GitHub Release URL
+REPO="ly87ing/java-perf-skill"
+RELEASE_URL="https://github.com/$REPO/releases/latest/download/$BINARY"
 
 echo -e "${YELLOW}[1/3] 下载二进制文件...${NC}"
 

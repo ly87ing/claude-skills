@@ -83,6 +83,28 @@ fn get_tools() -> Value {
                 }
             },
             {
+                "name": "analyze_bytecode",
+                "description": "🔬 字节码反编译 (javap)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "classPath": { "type": "string", "description": "类路径或 .class 文件" }
+                    },
+                    "required": ["classPath"]
+                }
+            },
+            {
+                "name": "analyze_heap",
+                "description": "🔬 堆内存分析 (jmap -histo)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "pid": { "type": "integer", "description": "Java 进程 PID" }
+                    },
+                    "required": ["pid"]
+                }
+            },
+            {
                 "name": "get_engine_status",
                 "description": "获取引擎状态",
                 "inputSchema": {
@@ -197,12 +219,25 @@ fn handle_tool_call(params: &Option<Value>) -> Result<Value, Box<dyn std::error:
                 .ok_or("Missing pid")? as u32;
             jdk_engine::analyze_thread_dump(pid)
         },
+        "analyze_bytecode" => {
+            let class_path = arguments.get("classPath")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing classPath")?;
+            jdk_engine::analyze_bytecode(class_path)
+        },
+        "analyze_heap" => {
+            let pid = arguments.get("pid")
+                .and_then(|v| v.as_i64())
+                .ok_or("Missing pid")? as u32;
+            jdk_engine::analyze_heap(pid)
+        },
         "get_engine_status" => {
             Ok(json!({
                 "version": "4.0.0",
                 "engine": "Rust Radar-Sniper",
-                "ast": "tree-sitter-java",
-                "jdk": jdk_engine::check_jdk_available()
+                "ast": "regex-based (15+ patterns)",
+                "jdk": jdk_engine::check_jdk_available(),
+                "tools": ["radar_scan", "scan_source_code", "analyze_log", "analyze_thread_dump", "analyze_bytecode", "analyze_heap"]
             }))
         },
         _ => Err(format!("Unknown tool: {}", tool_name).into()),
