@@ -7,6 +7,7 @@ mod cli;
 mod taint;
 mod symbol_table;
 mod project_detector;
+mod rules;
 
 use clap::{Parser, Subcommand};
 use tracing::Level;

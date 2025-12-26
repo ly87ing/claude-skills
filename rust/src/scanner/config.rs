@@ -25,6 +25,7 @@ impl LineBasedConfigAnalyzer {
     pub fn new() -> Result<Self> {
         Ok(Self {
             rules: vec![
+                // === 数据库连接池 ===
                 ConfigRule {
                     id: "DB_POOL_SMALL",
                     severity: Severity::P1,
@@ -40,6 +41,23 @@ impl LineBasedConfigAnalyzer {
                     description: "数据库连接池过小 (建议 >= 10)",
                 },
                 ConfigRule {
+                    id: "DB_CONNECTION_TIMEOUT_MISSING",
+                    severity: Severity::P1,
+                    full_key: "spring.datasource.hikari.connection-timeout",
+                    simple_key: "connection-timeout",
+                    validator: |val| {
+                        let v = val.split('#').next().unwrap_or("").trim();
+                        // 如果配置了超时，检查是否过长
+                        if let Ok(num) = v.parse::<i64>() {
+                            return num <= 30000; // 30秒内为合理
+                        }
+                        true
+                    },
+                    description: "连接超时配置过长 (建议 <= 30s)",
+                },
+
+                // === Tomcat 线程池 ===
+                ConfigRule {
                     id: "TOMCAT_THREADS_LOW",
                     severity: Severity::P1,
                     full_key: "server.tomcat.max-threads",
@@ -52,6 +70,73 @@ impl LineBasedConfigAnalyzer {
                         true
                     },
                     description: "Tomcat 最大线程数过低 (默认 200)",
+                },
+
+                // === JPA/Hibernate ===
+                ConfigRule {
+                    id: "JPA_OPEN_IN_VIEW",
+                    severity: Severity::P0,
+                    full_key: "spring.jpa.open-in-view",
+                    simple_key: "open-in-view",
+                    validator: |val| {
+                        let v = val.split('#').next().unwrap_or("").trim().to_lowercase();
+                        // open-in-view = true 是性能隐患
+                        v != "true"
+                    },
+                    description: "JPA open-in-view=true 会导致延迟加载问题，建议设为 false",
+                },
+                ConfigRule {
+                    id: "JPA_SHOW_SQL_PROD",
+                    severity: Severity::P1,
+                    full_key: "spring.jpa.show-sql",
+                    simple_key: "show-sql",
+                    validator: |val| {
+                        let v = val.split('#').next().unwrap_or("").trim().to_lowercase();
+                        // 生产环境不应该开启
+                        v != "true"
+                    },
+                    description: "JPA show-sql=true 影响性能，生产环境建议关闭",
+                },
+
+                // === 日志级别 ===
+                ConfigRule {
+                    id: "DEBUG_LOG_IN_PROD",
+                    severity: Severity::P1,
+                    full_key: "logging.level.root",
+                    simple_key: "level",
+                    validator: |val| {
+                        let v = val.split('#').next().unwrap_or("").trim().to_uppercase();
+                        // DEBUG 或 TRACE 级别在生产环境不合适
+                        v != "DEBUG" && v != "TRACE"
+                    },
+                    description: "日志级别为 DEBUG/TRACE，生产环境建议 INFO 或更高",
+                },
+
+                // === Redis ===
+                ConfigRule {
+                    id: "REDIS_TIMEOUT_MISSING",
+                    severity: Severity::P1,
+                    full_key: "spring.redis.timeout",
+                    simple_key: "timeout",
+                    validator: |val| {
+                        let v = val.split('#').next().unwrap_or("").trim();
+                        // 检查超时配置是否过长 (超过 10 秒可能有问题)
+                        if let Some(ms_str) = v.strip_suffix("ms") {
+                            if let Ok(num) = ms_str.parse::<i64>() {
+                                return num <= 10000;
+                            }
+                        }
+                        if let Some(s_str) = v.strip_suffix('s') {
+                            if let Ok(num) = s_str.parse::<i64>() {
+                                return num <= 10;
+                            }
+                        }
+                        if let Ok(num) = v.parse::<i64>() {
+                            return num <= 10000;
+                        }
+                        true
+                    },
+                    description: "Redis 超时配置过长 (建议 <= 10s)",
                 },
             ],
         })

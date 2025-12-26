@@ -71,9 +71,10 @@ pub fn handle_command(cmd: Command, json_output: bool) -> Result<()> {
             } else {
                 // 人类可读格式
                 Ok(json!(format!(
-                    "Java Perf v8.0.0\n\
+                    "Java Perf v9.0.0\n\
                     Engine: Rust Radar-Sniper (Tree-sitter + Regex)\n\
-                    AST Rules: 7 | Regex Rules: 6\n\
+                    AST Rules: 48 | Regex Rules: 7 | Config Rules: 7\n\
+                    Features: Rule Suppression, Two-Pass Semantic Analysis\n\
                     JDK Tools: jstack={}, jmap={}, javap={}",
                     jdk_engine::check_tool_available("jstack"),
                     jdk_engine::check_tool_available("jmap"),
