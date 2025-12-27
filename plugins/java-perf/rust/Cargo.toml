@@ -1,11 +1,11 @@
 [package]
 name = "java-perf"
-version = "9.5.0"
+version = "8.0.0"
 edition = "2021"
 authors = ["ly87ing"]
 description = "Java Performance Diagnostics Tool - CallGraph Taint Analysis"
 license = "MIT"
-repository = "https://github.com/ly87ing/java-perf-skill"
+repository = "https://github.com/ly87ing/dev-skills"
 
 [[bin]]
 name = "java-perf"
