@@ -51,7 +51,7 @@ esac
 mkdir -p "$INSTALL_DIR"
 
 # GitHub Release URL
-REPO="ly87ing/java-perf-skill"
+REPO="ly87ing/dev-skills"
 RELEASE_URL="https://github.com/$REPO/releases/latest/download/$BINARY"
 
 # Get plugin root from environment variable (set by Claude Code)
