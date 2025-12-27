@@ -1,10 +1,47 @@
 use super::{CodeAnalyzer, Issue, Severity};
 use std::path::Path;
+use std::cell::RefCell;
 use anyhow::{Result, anyhow};
-use tree_sitter::{Parser, Query, QueryCursor};
+use tree_sitter::{Parser, Query, QueryCursor, Tree};
 use crate::symbol_table::{TypeInfo, VarBinding}; // Import TypeInfo
 use crate::symbol_table::SymbolTable;
 use crate::rules::suppression::SuppressionContext;
+
+// ============================================================================
+// P0 优化: thread_local Parser 复用
+// ============================================================================
+//
+// Parser::new() 和 set_language() 涉及 native 层初始化和内存分配。
+// 使用 thread_local 确保每个线程只初始化一次 Parser，避免重复开销。
+// 这在 rayon 并行迭代器中尤其重要。
+//
+// ============================================================================
+
+thread_local! {
+    /// 线程本地 Parser 实例 (避免重复创建)
+    static JAVA_PARSER: RefCell<Option<Parser>> = const { RefCell::new(None) };
+}
+
+/// 获取或初始化线程本地 Parser
+fn with_parser<F, R>(language: &tree_sitter::Language, f: F) -> Result<R>
+where
+    F: FnOnce(&mut Parser) -> Result<R>,
+{
+    JAVA_PARSER.with(|cell| {
+        let mut parser_opt = cell.borrow_mut();
+
+        // 懒初始化 Parser
+        if parser_opt.is_none() {
+            let mut parser = Parser::new();
+            parser.set_language(language)
+                .map_err(|e| anyhow!("Failed to set language: {e}"))?;
+            *parser_opt = Some(parser);
+        }
+
+        let parser = parser_opt.as_mut().unwrap();
+        f(parser)
+    })
+}
 
 /// 预编译的规则
 struct CompiledRule {
@@ -578,6 +615,32 @@ impl JavaTreeSitterAnalyzer {
                     (#eq? @type_name "Random")
                 ) @field
             "#, "共享 Random 实例在高并发下性能差，考虑使用 ThreadLocalRandom"),
+
+            // ====== v9.1 从 Regex 迁移的 SQL 检测规则 ======
+
+            // 规则49: SELECT * 检测 - 匹配包含 "SELECT *" 的字符串字面量
+            ("SELECT_STAR", Severity::P1, r#"
+                (string_literal) @str
+                (#match? @str "SELECT\\s+\\*\\s+FROM")
+            "#, "SELECT * 查询，建议明确指定字段以减少数据传输"),
+
+            // 规则50: LIKE 前导通配符 - 匹配 LIKE '%xxx' 模式
+            ("LIKE_LEADING_WILDCARD", Severity::P0, r#"
+                (string_literal) @str
+                (#match? @str "LIKE\\s+['\"]%")
+            "#, "LIKE '%xxx' 前导通配符导致无法使用索引，引发全表扫描"),
+
+            // 规则51: HTTP 客户端使用检测 - 提醒检查超时配置
+            ("HTTP_CLIENT_TIMEOUT", Severity::P1, r#"
+                (method_invocation
+                    object: [
+                        (identifier) @obj
+                        (method_invocation) @obj
+                    ]
+                    name: (identifier) @method
+                    (#match? @obj "(HttpClient|RestTemplate|OkHttp|WebClient)")
+                ) @call
+            "#, "HTTP 客户端使用，请确认已配置连接超时和读取超时"),
         ];
 
         let mut compiled = Vec::with_capacity(rule_defs.len());
@@ -630,12 +693,49 @@ impl CodeAnalyzer for JavaTreeSitterAnalyzer {
 }
 
 impl JavaTreeSitterAnalyzer {
-    /// Phase 1: 提取符号信息
+    // ========================================================================
+    // P0 优化: 单次解析 API
+    // ========================================================================
+    //
+    // 提供 extract_and_analyze() 方法，一次解析同时完成：
+    // 1. 符号提取 (Phase 1)
+    // 2. 问题检测 (Phase 2)
+    //
+    // 这避免了之前的 Double Parsing 问题。
+    // ========================================================================
+
+    /// 单次解析：同时提取符号和检测问题 (避免 Double Parsing)
+    ///
+    /// 返回: (符号信息, 问题列表)
+    pub fn extract_and_analyze(
+        &self,
+        code: &str,
+        file_path: &Path,
+        ctx: Option<&SymbolTable>,
+    ) -> Result<((Option<TypeInfo>, Vec<VarBinding>), Vec<Issue>)> {
+        with_parser(&self.language, |parser| {
+            let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
+
+            // Phase 1: 提取符号
+            let symbols = self.extract_symbols_from_tree(&tree, code, file_path)?;
+
+            // Phase 2: 检测问题
+            let issues = self.analyze_tree_with_context(&tree, code, file_path, ctx)?;
+
+            Ok((symbols, issues))
+        })
+    }
+
+    /// Phase 1: 提取符号信息 (使用 thread_local Parser)
     pub fn extract_symbols(&self, code: &str, file_path: &Path) -> Result<(Option<TypeInfo>, Vec<VarBinding>)> {
-        let mut parser = Parser::new();
-        parser.set_language(&self.language).map_err(|e| anyhow!("Failed to set language: {e}"))?;
-        let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
-        
+        with_parser(&self.language, |parser| {
+            let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
+            self.extract_symbols_from_tree(&tree, code, file_path)
+        })
+    }
+
+    /// 从已解析的 Tree 中提取符号 (支持单次解析优化)
+    fn extract_symbols_from_tree(&self, tree: &Tree, code: &str, file_path: &Path) -> Result<(Option<TypeInfo>, Vec<VarBinding>)> {
         let mut query_cursor = QueryCursor::new();
         let matches = query_cursor.matches(&self.structure_query, tree.root_node(), code.as_bytes());
 
@@ -697,12 +797,16 @@ impl JavaTreeSitterAnalyzer {
         Ok((type_info, bindings))
     }
 
-    /// Phase 2: 深度分析 (带上下文)
+    /// Phase 2: 深度分析 (带上下文，使用 thread_local Parser)
     pub fn analyze_with_context(&self, code: &str, file_path: &Path, ctx: Option<&SymbolTable>) -> Result<Vec<Issue>> {
-        let mut parser = Parser::new();
-        parser.set_language(&self.language).map_err(|e| anyhow!("Failed to set language: {e}"))?;
+        with_parser(&self.language, |parser| {
+            let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
+            self.analyze_tree_with_context(&tree, code, file_path, ctx)
+        })
+    }
 
-        let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
+    /// 从已解析的 Tree 中进行深度分析 (支持单次解析优化)
+    fn analyze_tree_with_context(&self, tree: &Tree, code: &str, file_path: &Path, ctx: Option<&SymbolTable>) -> Result<Vec<Issue>> {
         let root_node = tree.root_node();
         let mut issues = Vec::new();
 
@@ -1560,6 +1664,44 @@ impl JavaTreeSitterAnalyzer {
                             }
                         }
                     },
+                    // ====== v9.1 从 Regex 迁移的规则处理 ======
+                    "SELECT_STAR" | "LIKE_LEADING_WILDCARD" => {
+                        // SQL 字符串检测 - 匹配 @str
+                        if let Some(str_idx) = rule.query.capture_index_for_name("str") {
+                            for capture in m.captures {
+                                if capture.index == str_idx {
+                                    let line = capture.node.start_position().row + 1;
+                                    let str_content = capture.node.utf8_text(code.as_bytes()).unwrap_or("");
+                                    issues.push(Issue {
+                                        id: rule.id.to_string(),
+                                        severity: rule.severity,
+                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                                        line,
+                                        description: rule.description.to_string(),
+                                        context: Some(str_content.chars().take(50).collect::<String>() + "..."),
+                                    });
+                                }
+                            }
+                        }
+                    },
+                    "HTTP_CLIENT_TIMEOUT" => {
+                        // HTTP 客户端调用检测 - 匹配 @call
+                        if let Some(call_idx) = rule.query.capture_index_for_name("call") {
+                            for capture in m.captures {
+                                if capture.index == call_idx {
+                                    let line = capture.node.start_position().row + 1;
+                                    issues.push(Issue {
+                                        id: rule.id.to_string(),
+                                        severity: rule.severity,
+                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                                        line,
+                                        description: rule.description.to_string(),
+                                        context: None,
+                                    });
+                                }
+                            }
+                        }
+                    },
                     _ => {}
                 }
             }
@@ -2049,5 +2191,45 @@ mod tests {
         // 文件级抑制应该过滤掉 N_PLUS_ONE 和 NESTED_LOOP
         assert!(!issues.iter().any(|i| i.id == "N_PLUS_ONE"), "N+1 should be suppressed at file level");
         assert!(!issues.iter().any(|i| i.id == "NESTED_LOOP"), "NESTED_LOOP should be suppressed at file level");
+    }
+
+    // ====== v9.1 新增测试：从 Regex 迁移的规则 ======
+
+    #[test]
+    fn test_select_star_detection() {
+        // 测试 SELECT * 检测
+        let code = r#"
+            public class UserRepository {
+                public List<User> findAll() {
+                    String sql = "SELECT * FROM users";
+                    return jdbcTemplate.query(sql, mapper);
+                }
+            }
+        "#;
+
+        let file = PathBuf::from("UserRepository.java");
+        let analyzer = JavaTreeSitterAnalyzer::new().unwrap();
+        let issues = analyzer.analyze(code, &file).unwrap();
+
+        assert!(issues.iter().any(|i| i.id == "SELECT_STAR"), "Should detect SELECT * in SQL string");
+    }
+
+    #[test]
+    fn test_like_leading_wildcard_detection() {
+        // 测试 LIKE '%xxx' 前导通配符检测
+        let code = r#"
+            public class SearchService {
+                public List<User> search(String name) {
+                    String sql = "SELECT id FROM users WHERE name LIKE '%" + name + "'";
+                    return jdbcTemplate.query(sql, mapper);
+                }
+            }
+        "#;
+
+        let file = PathBuf::from("SearchService.java");
+        let analyzer = JavaTreeSitterAnalyzer::new().unwrap();
+        let issues = analyzer.analyze(code, &file).unwrap();
+
+        assert!(issues.iter().any(|i| i.id == "LIKE_LEADING_WILDCARD"), "Should detect LIKE '%' leading wildcard");
     }
 }
