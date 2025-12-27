@@ -1,21 +1,21 @@
 {
-    "name": "java-perf",
-    "version": "8.0.0",
-    "description": "Java performance diagnostics using AST analysis. Identifies N+1 queries, memory leaks, lock contention, and concurrency risks.",
-    "author": {
-        "name": "ly87ing",
-        "url": "https://github.com/ly87ing"
-    },
-    "repository": "https://github.com/ly87ing/dev-skills",
-    "license": "MIT",
-    "keywords": [
-        "java",
-        "performance",
-        "diagnostics",
-        "n+1",
-        "memory-leak",
-        "deadlock"
-    ],
-    "hooks": "./hooks/hooks.json",
-    "skills": "./skills/"
+  "name": "java-perf",
+  "version": "8.1.0",
+  "description": "Java performance diagnostics using AST analysis. Identifies N+1 queries, memory leaks, lock contention, and concurrency risks.",
+  "author": {
+    "name": "ly87ing",
+    "url": "https://github.com/ly87ing"
+  },
+  "repository": "https://github.com/ly87ing/dev-skills",
+  "license": "MIT",
+  "keywords": [
+    "java",
+    "performance",
+    "diagnostics",
+    "n+1",
+    "memory-leak",
+    "deadlock"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "skills": "./skills/"
 }
