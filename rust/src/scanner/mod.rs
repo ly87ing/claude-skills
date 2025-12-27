@@ -6,6 +6,7 @@ pub mod tree_sitter_java;
 pub mod config;
 pub mod dockerfile;
 pub mod rule_handlers;  // v9.2: RuleHandler trait 解耦规则处理
+pub mod queries;        // v9.4: 外部化 Query 加载
 
 /// 严重级别
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

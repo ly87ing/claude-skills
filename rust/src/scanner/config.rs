@@ -1,6 +1,68 @@
 use super::{CodeAnalyzer, Issue, Severity};
 use std::path::Path;
 use anyhow::Result;
+use serde::Deserialize;
+
+// ============================================================================
+// v9.4: 结构化 YAML 解析 - Spring 配置模型
+// ============================================================================
+
+/// Spring 根配置
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct SpringConfig {
+    spring: SpringProperties,
+    server: ServerProperties,
+}
+
+/// spring.* 配置
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct SpringProperties {
+    datasource: DatasourceConfig,
+    jpa: JpaConfig,
+}
+
+/// spring.datasource.* 配置
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct DatasourceConfig {
+    hikari: HikariConfig,
+}
+
+/// spring.datasource.hikari.* 配置
+#[derive(Debug, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+struct HikariConfig {
+    maximum_pool_size: Option<i32>,
+    connection_timeout: Option<i64>,
+}
+
+/// spring.jpa.* 配置
+#[derive(Debug, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+struct JpaConfig {
+    open_in_view: Option<bool>,
+    show_sql: Option<bool>,
+}
+
+/// server.* 配置
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct ServerProperties {
+    tomcat: TomcatConfig,
+}
+
+/// server.tomcat.* 配置
+#[derive(Debug, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+struct TomcatConfig {
+    max_threads: Option<i32>,
+}
+
+// ============================================================================
+// 行匹配分析器 (保留作为 Properties 文件和备用方案)
+// ============================================================================
 
 /// 基于行的配置分析器
 /// 
@@ -205,6 +267,89 @@ impl CodeAnalyzer for LineBasedConfigAnalyzer {
     }
 }
 
+// ============================================================================
+// v9.4: 结构化 YAML 分析
+// ============================================================================
+
+impl LineBasedConfigAnalyzer {
+    /// 使用 serde_yaml 进行结构化分析 (用于 YAML 文件)
+    pub fn analyze_yaml_structured(&self, code: &str, file_name: &str) -> Vec<Issue> {
+        let mut issues = Vec::new();
+        
+        // 尝试解析为 SpringConfig
+        let config: SpringConfig = match serde_yaml::from_str(code) {
+            Ok(c) => c,
+            Err(_) => return issues, // 解析失败，返回空
+        };
+        
+        // 检查 Hikari 连接池配置
+        if let Some(pool_size) = config.spring.datasource.hikari.maximum_pool_size {
+            if pool_size < 5 {
+                issues.push(Issue {
+                    id: "DB_POOL_SMALL".to_string(),
+                    severity: Severity::P1,
+                    file: file_name.to_string(),
+                    line: 0, // 结构化解析无法获取行号
+                    description: format!("数据库连接池过小: {} (建议 >= 10)", pool_size),
+                    context: Some(format!("maximum-pool-size: {}", pool_size)),
+                });
+            }
+        }
+        
+        if let Some(timeout) = config.spring.datasource.hikari.connection_timeout {
+            if timeout > 30000 {
+                issues.push(Issue {
+                    id: "DB_CONNECTION_TIMEOUT_LONG".to_string(),
+                    severity: Severity::P1,
+                    file: file_name.to_string(),
+                    line: 0,
+                    description: format!("连接超时过长: {}ms (建议 <= 30000)", timeout),
+                    context: Some(format!("connection-timeout: {}", timeout)),
+                });
+            }
+        }
+        
+        // 检查 JPA 配置
+        if let Some(true) = config.spring.jpa.open_in_view {
+            issues.push(Issue {
+                id: "JPA_OPEN_IN_VIEW".to_string(),
+                severity: Severity::P0,
+                file: file_name.to_string(),
+                line: 0,
+                description: "JPA open-in-view=true 会导致延迟加载问题".to_string(),
+                context: Some("open-in-view: true".to_string()),
+            });
+        }
+        
+        if let Some(true) = config.spring.jpa.show_sql {
+            issues.push(Issue {
+                id: "JPA_SHOW_SQL_PROD".to_string(),
+                severity: Severity::P1,
+                file: file_name.to_string(),
+                line: 0,
+                description: "JPA show-sql=true 影响性能".to_string(),
+                context: Some("show-sql: true".to_string()),
+            });
+        }
+        
+        // 检查 Tomcat 配置
+        if let Some(threads) = config.server.tomcat.max_threads {
+            if threads < 200 {
+                issues.push(Issue {
+                    id: "TOMCAT_THREADS_LOW".to_string(),
+                    severity: Severity::P1,
+                    file: file_name.to_string(),
+                    line: 0,
+                    description: format!("Tomcat 最大线程数过低: {} (默认 200)", threads),
+                    context: Some(format!("max-threads: {}", threads)),
+                });
+            }
+        }
+        
+        issues
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +389,34 @@ server.tomcat.max-threads=250
         // only pool size is small
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].id, "DB_POOL_SMALL");
+    }
+
+    #[test]
+    fn test_structured_yaml_analysis() {
+        let code = r#"
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 3
+      connection-timeout: 60000
+  jpa:
+    open-in-view: true
+    show-sql: true
+server:
+  tomcat:
+    max-threads: 100
+"#;
+        let analyzer = LineBasedConfigAnalyzer::new().unwrap();
+        let issues = analyzer.analyze_yaml_structured(code, "application.yml");
+        
+        // 应检测到 5 个问题
+        assert_eq!(issues.len(), 5);
+        
+        let ids: Vec<_> = issues.iter().map(|i| i.id.as_str()).collect();
+        assert!(ids.contains(&"DB_POOL_SMALL"));
+        assert!(ids.contains(&"DB_CONNECTION_TIMEOUT_LONG"));
+        assert!(ids.contains(&"JPA_OPEN_IN_VIEW"));
+        assert!(ids.contains(&"JPA_SHOW_SQL_PROD"));
+        assert!(ids.contains(&"TOMCAT_THREADS_LOW"));
     }
 }

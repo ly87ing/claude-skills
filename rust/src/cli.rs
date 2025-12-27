@@ -52,8 +52,9 @@ pub fn handle_command(cmd: Command, json_output: bool) -> Result<()> {
         }
 
         Command::Status => {
+            let version = env!("CARGO_PKG_VERSION");
             let status = json!({
-                "version": "8.0.0",
+                "version": version,
                 "engine": "Rust Radar-Sniper",
                 "ast_rules": ["N_PLUS_ONE", "NESTED_LOOP", "SYNC_METHOD", "THREADLOCAL_LEAK",
                     "STREAM_RESOURCE_LEAK", "SLEEP_IN_LOCK", "LOCK_METHOD_CALL"],
@@ -69,13 +70,13 @@ pub fn handle_command(cmd: Command, json_output: bool) -> Result<()> {
             if json_output {
                 Ok(status)
             } else {
-                // 人类可读格式
                 Ok(json!(format!(
-                    "Java Perf v9.0.0\n\
-                    Engine: Rust Radar-Sniper (Tree-sitter + Regex)\n\
-                    AST Rules: 48 | Regex Rules: 7 | Config Rules: 7\n\
-                    Features: Rule Suppression, Two-Pass Semantic Analysis\n\
+                    "Java Perf v{}\n\
+                    Engine: Rust Radar-Sniper (Tree-sitter AST)\n\
+                    AST Rules: 48 | Config Rules: 7 | Dockerfile Rules: 5\n\
+                    Features: Rule Suppression, Two-Pass Semantic Analysis, CallGraph\n\
                     JDK Tools: jstack={}, jmap={}, javap={}",
+                    version,
                     jdk_engine::check_tool_available("jstack"),
                     jdk_engine::check_tool_available("jmap"),
                     jdk_engine::check_tool_available("javap")

@@ -83,6 +83,21 @@ impl CallGraph {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// 合并另一个 CallGraph (用于 Rayon 并行 reduce) - v9.4
+    pub fn merge(&mut self, other: Self) {
+        // 合并 outgoing 边
+        for (method, calls) in other.outgoing {
+            self.outgoing.entry(method).or_default().extend(calls);
+        }
+        // 合并 incoming 边
+        for (method, calls) in other.incoming {
+            self.incoming.entry(method).or_default().extend(calls);
+        }
+        // 合并类索引
+        self.class_index.extend(other.class_index);
+        self.class_layers.extend(other.class_layers);
+    }
     
     /// 添加调用关系
     pub fn add_call(&mut self, caller: MethodSig, callee: MethodSig, file: PathBuf, line: usize) {

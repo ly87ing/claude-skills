@@ -161,6 +161,19 @@ impl SymbolTable {
         Self::default()
     }
 
+    /// 合并另一个 SymbolTable (用于 Rayon 并行 reduce)
+    /// 
+    /// v9.4: 支持并行构建符号表，避免串行合并瓶颈
+    pub fn merge(&mut self, other: Self) {
+        self.classes.extend(other.classes);
+        self.fields.extend(other.fields);
+        self.methods.extend(other.methods);
+        // 合并方法索引
+        for (key, sigs) in other.method_index {
+            self.method_index.entry(key).or_default().extend(sigs);
+        }
+    }
+
     /// 注册类
     pub fn register_class(&mut self, info: TypeInfo) {
         self.classes.insert(info.name.clone(), info);
@@ -325,5 +338,31 @@ mod tests {
         method.add_param("flush", "boolean");
 
         assert_eq!(method.signature(), "save(User,boolean)");
+    }
+
+    #[test]
+    fn test_symbol_table_merge() {
+        // 创建第一个表
+        let mut table1 = SymbolTable::new();
+        let mut repo_type = TypeInfo::new("UserRepository", PathBuf::from("UserRepository.java"), 1);
+        repo_type.add_annotation("Repository");
+        table1.register_class(repo_type);
+        table1.register_field("UserService", VarBinding::new("userRepo", "UserRepository", true));
+
+        // 创建第二个表
+        let mut table2 = SymbolTable::new();
+        let service_type = TypeInfo::new("OrderService", PathBuf::from("OrderService.java"), 1);
+        table2.register_class(service_type);
+        table2.register_field("OrderController", VarBinding::new("orderService", "OrderService", true));
+
+        // 合并
+        table1.merge(table2);
+
+        // 验证合并结果
+        assert_eq!(table1.classes.len(), 2);
+        assert!(table1.classes.contains_key("UserRepository"));
+        assert!(table1.classes.contains_key("OrderService"));
+        assert_eq!(table1.fields.len(), 2);
+        assert!(table1.is_dao_var("UserService", "userRepo"));
     }
 }

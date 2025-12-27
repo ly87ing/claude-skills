@@ -2,6 +2,10 @@
 //!
 //! 🛰️ 雷达扫描：检测性能反模式
 //!
+//! v9.4 性能优化:
+//! - **Rayon reduce 并行合并**: 符号表构建使用两两合并策略，消除串行瓶颈
+//! - 规则处理器多态分发 (rule_handlers.rs)
+//!
 //! v9.1 架构重构:
 //! - AST 规则优先 (tree_sitter_java.rs)
 //! - **所有规则已迁移至 Tree-sitter** (v9.1)
@@ -16,6 +20,8 @@
 //! 6. 双遍语义引擎 (v8.0)
 //! 7. 规则去重，消除 Regex/AST 冲突 (v9.0)
 //! 8. 移除所有 Regex 规则，全部使用 Tree-sitter (v9.1)
+//! 9. Rayon reduce 并行合并符号表 (v9.4)
+//! 10. CallGraph 调用链追踪 (v9.4)
 
 use serde_json::{json, Value};
 use std::path::Path;
@@ -27,6 +33,8 @@ use crate::scanner::{CodeAnalyzer, Issue as ScannerIssue, Severity as ScannerSev
 use crate::scanner::tree_sitter_java::JavaTreeSitterAnalyzer;
 use crate::scanner::config::LineBasedConfigAnalyzer;
 use crate::scanner::dockerfile::DockerfileAnalyzer;
+use crate::taint::{CallGraph, MethodSig, LayerType};
+use crate::symbol_table::LayerType as SymbolLayerType;
 
 // ============================================================================
 // 规则定义
@@ -106,52 +114,75 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
     let config_analyzer = LineBasedConfigAnalyzer::new().ok();
     let docker_analyzer = DockerfileAnalyzer::new().ok();
 
-    // === Phase 1: Indexing (构建全局符号表) ===
-    let mut symbol_table = crate::symbol_table::SymbolTable::new();
-    
-    // 只有目录扫描且包含 Java 文件时才进行索引构建
-    if is_dir {
-        // 使用并行迭代器进行索引
-        // 注意：由于 SymbolTable 需要合并，我们使用 map/reduce
+    // === Phase 1: Indexing (构建全局符号表 + 调用图) ===
+    // v9.4: 使用 Rayon reduce 并行合并 SymbolTable 和 CallGraph
+    let (symbol_table, call_graph) = if is_dir {
+        // 筛选 Java 文件
         let java_files: Vec<_> = entries.iter()
             .filter(|e| e.path().extension().and_then(|e| e.to_str()) == Some("java"))
             .collect();
             
         if !java_files.is_empty() {
-            // Log indexing (optional)
-            // println!("Phase 1: Indexing {} Java files...", java_files.len());
-            
-            let tables: Vec<crate::symbol_table::SymbolTable> = java_files.par_iter().map(|entry| {
-                let mut local_table = crate::symbol_table::SymbolTable::new();
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                    if let Ok((Some(type_info), bindings)) = java_analyzer.extract_symbols(&content, entry.path()) {
-                        // 注册类和字段
-                        let class_name = type_info.name.clone();
-                        local_table.register_class(type_info);
-                        for binding in bindings {
-                            local_table.register_field(&class_name, binding);
+            // 使用 reduce 并行两两合并
+            java_files.par_iter()
+                .map(|entry| {
+                    let mut local_table = crate::symbol_table::SymbolTable::new();
+                    let mut local_graph = CallGraph::new();
+                    
+                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        // 1. 提取符号和类信息
+                        if let Ok((Some(type_info), bindings)) = java_analyzer.extract_symbols(&content, entry.path()) {
+                            let class_name = type_info.name.clone();
+                            
+                            // 根据 SymbolTable 的 LayerType 转换为 taint 的 LayerType
+                            let layer = match type_info.layer {
+                                SymbolLayerType::Controller => LayerType::Controller,
+                                SymbolLayerType::Service => LayerType::Service,
+                                SymbolLayerType::Repository => LayerType::Repository,
+                                _ => LayerType::Unknown,
+                            };
+                            
+                            // 注册到 CallGraph
+                            local_graph.register_class(&class_name, entry.path().to_path_buf(), layer);
+                            
+                            // 注册到 SymbolTable
+                            local_table.register_class(type_info);
+                            for binding in bindings {
+                                local_table.register_field(&class_name, binding);
+                            }
+                            
+                            // 2. 提取调用点并构建 CallGraph
+                            if let Ok(call_sites) = java_analyzer.extract_call_sites(&content, entry.path()) {
+                                for (caller_method, receiver, callee_method, line) in call_sites {
+                                    // 构建调用关系
+                                    // 注意: receiver 可能是字段名，需要通过 SymbolTable 解析实际类型
+                                    // 简化处理: 直接使用 receiver 作为类名（后续可增强）
+                                    let caller = MethodSig::new(&class_name, &caller_method);
+                                    let callee = MethodSig::new(&receiver, &callee_method);
+                                    local_graph.add_call(caller, callee, entry.path().to_path_buf(), line);
+                                }
+                            }
                         }
                     }
-                }
-                local_table
-            }).collect();
-            
-            // Merge all tables
-            for table in tables {
-                for (name, info) in table.classes {
-                    symbol_table.classes.insert(name, info);
-                }
-                for (key, binding) in table.fields {
-                    symbol_table.fields.insert(key, binding);
-                }
-                for (key, info) in table.methods {
-                    symbol_table.methods.insert(key, info);
-                }
-            }
+                    (local_table, local_graph)
+                })
+                .reduce(
+                    || (crate::symbol_table::SymbolTable::new(), CallGraph::new()),
+                    |(mut acc_table, mut acc_graph), (table, graph)| {
+                        acc_table.merge(table);
+                        acc_graph.merge(graph);
+                        (acc_table, acc_graph)
+                    }
+                )
+        } else {
+            (crate::symbol_table::SymbolTable::new(), CallGraph::new())
         }
-    }
+    } else {
+        (crate::symbol_table::SymbolTable::new(), CallGraph::new())
+    };
     
     let symbol_table_ref = &symbol_table;
+    let call_graph_ref = &call_graph; // v9.4: 用于 N+1 验证
 
     // === Phase 2: Deep Analysis (深度扫描) ===
     // 使用 Mutex 保护共享状态 (rayon 并行安全)
@@ -170,12 +201,11 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
 
         if ext == "java" {
             if let Ok(content) = std::fs::read_to_string(file_path) {
-                // v9.1: 所有规则已迁移到 Tree-sitter AST 分析
-                // AST Analysis (with Context)
-                // 传入全局 SymbolTable 引用
-                let ctx = if is_dir { Some(symbol_table_ref) } else { None };
+                // v9.4: 传入 SymbolTable 和 CallGraph 用于语义分析和 N+1 验证
+                let symbol_ctx = if is_dir { Some(symbol_table_ref) } else { None };
+                let cg_ctx = if is_dir { Some(call_graph_ref) } else { None };
 
-                if let Ok(ast_results) = java_analyzer.analyze_with_context(&content, file_path, ctx) {
+                if let Ok(ast_results) = java_analyzer.analyze_with_context(&content, file_path, symbol_ctx, cg_ctx) {
                     local_issues.extend(ast_results.into_iter().map(convert_issue));
                 }
             }

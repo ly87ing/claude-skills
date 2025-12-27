@@ -1,4 +1,5 @@
 use super::{CodeAnalyzer, Issue, Severity};
+use super::rule_handlers::RuleContext;  // v9.3: 导入 RuleContext
 use std::path::Path;
 use std::cell::RefCell;
 use anyhow::{Result, anyhow};
@@ -43,12 +44,14 @@ where
     })
 }
 
-/// 预编译的规则
+/// 预编译的规则 (v9.3: 集成 RuleHandler)
 struct CompiledRule {
     id: &'static str,
     severity: Severity,
     query: Query,
     description: &'static str,
+    /// v9.3: 规则处理器 (替代 match rule.id 分支)
+    handler: Box<dyn super::rule_handlers::RuleHandler>,
 }
 
 pub struct JavaTreeSitterAnalyzer {
@@ -57,6 +60,8 @@ pub struct JavaTreeSitterAnalyzer {
     compiled_rules: Vec<CompiledRule>,
     /// 结构提取查询 (用于 Phase 1)
     structure_query: Query,
+    /// 调用点提取查询 (用于 CallGraph 构建) - v9.4
+    call_site_query: Query,
 }
 
 impl JavaTreeSitterAnalyzer {
@@ -65,12 +70,14 @@ impl JavaTreeSitterAnalyzer {
         
         // 预编译所有查询
         let compiled_rules = Self::compile_rules(&language)?;
-        let structure_query = Self::compile_structure_query(&language)?; // 新增结构化查询
+        let structure_query = Self::compile_structure_query(&language)?;
+        let call_site_query = Self::compile_call_site_query(&language)?; // v9.4: 调用点提取
         
         Ok(Self {
             language,
             compiled_rules,
             structure_query,
+            call_site_query,
         })
     }
 
@@ -644,19 +651,30 @@ impl JavaTreeSitterAnalyzer {
         ];
 
         let mut compiled = Vec::with_capacity(rule_defs.len());
-        
+
         for (id, severity, query_str, description) in rule_defs {
-            let query = Query::new(language, query_str)
-                .map_err(|e| anyhow!("Failed to compile query for {id}: {e}"))?;
-            
+            // v9.3: 防御性编程 - 验证 Query 编译
+            let query = match Query::new(language, query_str) {
+                Ok(q) => q,
+                Err(e) => {
+                    // 记录错误但不崩溃，跳过这个规则
+                    eprintln!("[WARN] Failed to compile query for rule '{}': {}", id, e);
+                    continue;
+                }
+            };
+
+            // v9.3: 使用 create_handler 获取规则处理器
+            let handler = super::rule_handlers::create_handler(id);
+
             compiled.push(CompiledRule {
                 id,
                 severity,
                 query,
                 description,
+                handler,
             });
         }
-        
+
         Ok(compiled)
     }
 
@@ -679,6 +697,24 @@ impl JavaTreeSitterAnalyzer {
         "#;
         Query::new(language, query_str).map_err(|e| anyhow!("Failed to compile structure query: {e}"))
     }
+
+    /// 编译调用点提取查询 (用于 CallGraph 构建) - v9.4
+    fn compile_call_site_query(language: &tree_sitter::Language) -> Result<Query> {
+        let query_str = r#"
+            (method_declaration
+                name: (identifier) @caller_method
+                body: (block
+                    (expression_statement
+                        (method_invocation
+                            object: (identifier) @receiver
+                            name: (identifier) @callee_method
+                        ) @call
+                    )
+                )
+            )
+        "#;
+        Query::new(language, query_str).map_err(|e| anyhow!("Failed to compile call site query: {e}"))
+    }
 }
 
 impl CodeAnalyzer for JavaTreeSitterAnalyzer {
@@ -687,8 +723,8 @@ impl CodeAnalyzer for JavaTreeSitterAnalyzer {
     }
 
     fn analyze(&self, code: &str, file_path: &Path) -> Result<Vec<Issue>> {
-        // Default analyze implementation for trait (single pass fallback)
-        self.analyze_with_context(code, file_path, None)
+        // Default analyze implementation for trait (single pass fallback, no CallGraph)
+        self.analyze_with_context(code, file_path, None, None)
     }
 }
 
@@ -719,8 +755,8 @@ impl JavaTreeSitterAnalyzer {
             // Phase 1: 提取符号
             let symbols = self.extract_symbols_from_tree(&tree, code, file_path)?;
 
-            // Phase 2: 检测问题
-            let issues = self.analyze_tree_with_context(&tree, code, file_path, ctx)?;
+            // Phase 2: 检测问题 (无 CallGraph)
+            let issues = self.analyze_tree_with_context(&tree, code, file_path, ctx, None)?;
 
             Ok((symbols, issues))
         })
@@ -797,918 +833,113 @@ impl JavaTreeSitterAnalyzer {
         Ok((type_info, bindings))
     }
 
-    /// Phase 2: 深度分析 (带上下文，使用 thread_local Parser)
-    pub fn analyze_with_context(&self, code: &str, file_path: &Path, ctx: Option<&SymbolTable>) -> Result<Vec<Issue>> {
+    /// 提取调用点信息 (用于 CallGraph 构建) - v9.4
+    /// 
+    /// 返回: Vec<(caller_method, receiver, callee_method, line)>
+    pub fn extract_call_sites(&self, code: &str, file_path: &Path) -> Result<Vec<(String, String, String, usize)>> {
         with_parser(&self.language, |parser| {
             let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
-            self.analyze_tree_with_context(&tree, code, file_path, ctx)
+            self.extract_call_sites_from_tree(&tree, code, file_path)
+        })
+    }
+
+    /// 从已解析的 Tree 中提取调用点
+    fn extract_call_sites_from_tree(&self, tree: &Tree, code: &str, _file_path: &Path) -> Result<Vec<(String, String, String, usize)>> {
+        let mut call_sites = Vec::new();
+        let mut query_cursor = QueryCursor::new();
+        let matches = query_cursor.matches(&self.call_site_query, tree.root_node(), code.as_bytes());
+
+        let caller_idx = self.call_site_query.capture_index_for_name("caller_method");
+        let receiver_idx = self.call_site_query.capture_index_for_name("receiver");
+        let callee_idx = self.call_site_query.capture_index_for_name("callee_method");
+        let call_idx = self.call_site_query.capture_index_for_name("call");
+
+        for m in matches {
+            let mut caller_method = String::new();
+            let mut receiver = String::new();
+            let mut callee_method = String::new();
+            let mut line = 0;
+
+            for capture in m.captures {
+                if Some(capture.index) == caller_idx {
+                    caller_method = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
+                }
+                if Some(capture.index) == receiver_idx {
+                    receiver = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
+                }
+                if Some(capture.index) == callee_idx {
+                    callee_method = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
+                }
+                if Some(capture.index) == call_idx {
+                    line = capture.node.start_position().row + 1;
+                }
+            }
+
+            if !caller_method.is_empty() && !callee_method.is_empty() {
+                call_sites.push((caller_method, receiver, callee_method, line));
+            }
+        }
+
+        Ok(call_sites)
+    }
+
+    /// Phase 2: 深度分析 (带上下文，使用 thread_local Parser)
+    /// 
+    /// v9.4: 添加 call_graph 参数用于 N+1 验证增强
+    pub fn analyze_with_context(
+        &self,
+        code: &str,
+        file_path: &Path,
+        symbol_table: Option<&SymbolTable>,
+        call_graph: Option<&crate::taint::CallGraph>,
+    ) -> Result<Vec<Issue>> {
+        with_parser(&self.language, |parser| {
+            let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
+            self.analyze_tree_with_context(&tree, code, file_path, symbol_table, call_graph)
         })
     }
 
     /// 从已解析的 Tree 中进行深度分析 (支持单次解析优化)
-    fn analyze_tree_with_context(&self, tree: &Tree, code: &str, file_path: &Path, ctx: Option<&SymbolTable>) -> Result<Vec<Issue>> {
+    /// v9.4: 添加 call_graph 参数
+    fn analyze_tree_with_context(
+        &self,
+        tree: &Tree,
+        code: &str,
+        file_path: &Path,
+        symbol_table: Option<&SymbolTable>,
+        call_graph: Option<&crate::taint::CallGraph>,
+    ) -> Result<Vec<Issue>> {
         let root_node = tree.root_node();
         let mut issues = Vec::new();
 
         // 获取当前类名 (用于 is_dao_call 上下文)
         let current_class_name = file_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
 
+        // v9.4: 构建 RuleContext，传入 call_graph 用于 N+1 验证
+        let rule_ctx = RuleContext {
+            code,
+            file_path,
+            current_class: &current_class_name,
+            symbol_table,
+            call_graph,
+        };
+
         // 使用预编译的查询 (不再每次编译)
         for rule in &self.compiled_rules {
             let mut query_cursor = QueryCursor::new();
             let matches = query_cursor.matches(&rule.query, root_node, code.as_bytes());
 
+            // v9.3: 使用多态分发替代巨型 match
             for m in matches {
-                match rule.id {
-                    // N+1 检测：支持 for, while, foreach 三种循环
-                    "N_PLUS_ONE" | "N_PLUS_ONE_WHILE" | "N_PLUS_ONE_FOREACH" => {
-                        // v9.2: 使用 expect 提供更有意义的错误信息
-                        let method_name_idx = rule.query.capture_index_for_name("method_name")
-                            .expect("N+1 query must have @method_name capture");
-                        let call_idx = rule.query.capture_index_for_name("call")
-                            .expect("N+1 query must have @call capture");
-                        let mut method_name_text = String::new();
-                        let mut line = 0;
-                        
-                        // 尝试获取调用对象变量名 (虽然 query 中没显式 capture object，但可以通过 AST 遍历获取)
-                         // 这是一个简化，理想情况需要在 query 里加 @object capture。
-                         // 这里我们先用旧逻辑，然后用 ctx 增强。
-                        
-                        for capture in m.captures {
-                            if capture.index == method_name_idx {
-                                method_name_text = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
-                            }
-                            if capture.index == call_idx {
-                                line = capture.node.start_position().row + 1;
-                            }
-                        }
-                        
-                        let mut is_suspicious = false;
-                        
-                        // 1. 尝试获取 receiver (variable name)
-                        // AST 结构: (method_invocation object: (identifier) @obj ...)
-                        // 由于 query 没捕获 object，我们需要手动从 method_invocation node 找
-                        let mut receiver_name = String::new();
-                         if let Some(call_node) = m.captures.iter().find(|c| c.index == call_idx).map(|c| c.node) {
-                             if let Some(obj_node) = call_node.child_by_field_name("object") {
-                                 receiver_name = obj_node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
-                             }
-                         }
-
-                         if let Some(symbol_table) = ctx {
-                            // === Semantic Mode ===
-                            if !receiver_name.is_empty() {
-                                if symbol_table.is_dao_call(&current_class_name, &receiver_name, &method_name_text) {
-                                    is_suspicious = true;
-                                }
-                            } else {
-                                // 如果没有 receiver (this.call), 或者是复杂表达式，暂时忽略或用硬编码
-                                // 对于 N+1，通常是 repo.findAll()
-                                if method_name_text.contains("find") || method_name_text.contains("save") {
-                                     is_suspicious = true; // Fallback
-                                }
-                            }
-                        } else {
-                            // === Heuristic Mode (Legacy) ===
-                            // v9.0 修复：收窄匹配规则，避免匹配普通 getter
-                            // 1. 明确的 DAO 方法模式
-                            let dao_patterns = [
-                                "findBy", "findAll", "findOne", "findById",
-                                "saveAll", "saveAndFlush",
-                                "deleteBy", "deleteAll", "deleteById",
-                                "selectBy", "selectAll", "selectOne", "selectList",
-                                "queryBy", "queryFor", "queryAll",
-                                "loadBy", "loadAll",
-                                "fetchBy", "fetchAll",
-                                "insertBy", "insert",
-                                "updateBy", "update",
-                                "getById", "getOne", "getAll", "getList",
-                            ];
-
-                            // 2. 检查方法名是否匹配 DAO 模式
-                            for pattern in dao_patterns {
-                                if method_name_text.starts_with(pattern) ||
-                                   method_name_text.eq_ignore_ascii_case(pattern) {
-                                    is_suspicious = true;
-                                    break;
-                                }
-                            }
-
-                            // 3. 额外检查：如果 receiver 名称包含 DAO 相关关键词
-                            if !is_suspicious && !receiver_name.is_empty() {
-                                let receiver_lower = receiver_name.to_lowercase();
-                                if receiver_lower.contains("repo") ||
-                                   receiver_lower.contains("dao") ||
-                                   receiver_lower.contains("mapper") ||
-                                   receiver_lower.contains("service") {
-                                    // 即使方法名不完全匹配，但 receiver 是 DAO 相关的
-                                    // 检查是否是常见的数据操作方法
-                                    if method_name_text.starts_with("find") ||
-                                       method_name_text.starts_with("save") ||
-                                       method_name_text.starts_with("delete") ||
-                                       method_name_text.starts_with("select") ||
-                                       method_name_text.starts_with("query") ||
-                                       method_name_text.starts_with("insert") ||
-                                       method_name_text.starts_with("update") {
-                                        is_suspicious = true;
-                                    }
-                                }
-                            }
-                        }
-
-                        if is_suspicious {
-                            let file_name = file_path.file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "unknown".to_string());
-
-                            // 统一 ID 为 N_PLUS_ONE，便于上层处理
-                            issues.push(Issue {
-                                id: "N_PLUS_ONE".to_string(),
-                                severity: rule.severity,
-                                file: file_name,
-                                line,
-                                description: format!("{} (Method: {})", rule.description, method_name_text),
-                                context: Some(method_name_text),
-                            });
-                        }
-                    },
-                    // 嵌套循环检测：支持 for-for, for-foreach, foreach-for, foreach-foreach
-                    "NESTED_LOOP" | "NESTED_LOOP_MIXED" => {
-                        let inner_loop_idx = rule.query.capture_index_for_name("inner_loop")
-                            .expect("NESTED_LOOP query must have @inner_loop capture");
-                        for capture in m.captures {
-                            if capture.index == inner_loop_idx {
-                                let line = capture.node.start_position().row + 1;
-                                // 统一 ID 为 NESTED_LOOP
-                                issues.push(Issue {
-                                    id: "NESTED_LOOP".to_string(),
-                                    severity: rule.severity,
-                                    file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                    line,
-                                    description: rule.description.to_string(),
-                                    context: None,
-                                });
-                            }
-                        }
-                    },
-                    "SYNC_METHOD" => {
-                        let mods_idx = rule.query.capture_index_for_name("mods")
-                            .expect("SYNC_METHOD query must have @mods capture");
-                        for capture in m.captures {
-                            if capture.index == mods_idx {
-                                let mods_text = capture.node.utf8_text(code.as_bytes()).unwrap_or("");
-                                if mods_text.contains("synchronized") {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: Some(mods_text.to_string()),
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "THREADLOCAL_LEAK" => {
-                        let set_call_idx = rule.query.capture_index_for_name("set_call")
-                            .expect("THREADLOCAL_LEAK query must have @set_call capture");
-                        let var_name_idx = rule.query.capture_index_for_name("var_name")
-                            .expect("THREADLOCAL_LEAK query must have @var_name capture");
-
-                        let mut var_name = String::new();
-                        let mut set_node = None;
-
-                        for capture in m.captures {
-                            if capture.index == var_name_idx {
-                                var_name = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
-                            }
-                            if capture.index == set_call_idx {
-                                set_node = Some(capture.node);
-                            }
-                        }
-
-                        if let (false, Some(node)) = (var_name.is_empty(), set_node) {
-                            // 向上查找 method_declaration
-                            let mut current = node.parent();
-                            let mut method_node = None;
-                            
-                            while let Some(n) = current {
-                                if n.kind() == "method_declaration" {
-                                    method_node = Some(n);
-                                    break;
-                                }
-                                current = n.parent();
-                            }
-
-                            if let Some(method) = method_node {
-                                let method_text = method.utf8_text(code.as_bytes()).unwrap_or("");
-                                let remove_call = format!("{var_name}.remove()");
-                                
-                                if !method_text.contains(&remove_call) {
-                                     let line = node.start_position().row + 1;
-                                     issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: format!("{} (Variable: {})", rule.description, var_name),
-                                        context: Some(var_name),
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "STREAM_RESOURCE_LEAK" => {
-                        // 检测 try 块内创建的流资源
-                        if let Some(type_idx) = rule.query.capture_index_for_name("type_name") {
-                            if let Some(var_idx) = rule.query.capture_index_for_name("var_name") {
-                                let mut type_name = String::new();
-                                let mut var_name = String::new();
-                                let mut line = 0;
-
-                                for capture in m.captures {
-                                    if capture.index == type_idx {
-                                        type_name = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
-                                    }
-                                    if capture.index == var_idx {
-                                        var_name = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
-                                        line = capture.node.start_position().row + 1;
-                                    }
-                                }
-
-                                // 只关注流类型
-                                if type_name.contains("Stream") || 
-                                   type_name.contains("Reader") || 
-                                   type_name.contains("Writer") ||
-                                   type_name.contains("Connection") ||
-                                   type_name.contains("Socket") {
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: format!("{} (Type: {}, Var: {})", rule.description, type_name, var_name),
-                                        context: Some(var_name),
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "SLEEP_IN_LOCK" => {
-                        // 检测 synchronized 块内的 Thread.sleep()
-                        if let Some(sync_idx) = rule.query.capture_index_for_name("sync_block") {
-                            for capture in m.captures {
-                                if capture.index == sync_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: Some("Thread.sleep() in synchronized".to_string()),
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "LOCK_METHOD_CALL" => {
-                        // 检测 ReentrantLock.lock() 调用
-                        if let Some(lock_idx) = rule.query.capture_index_for_name("lock_call") {
-                            if let Some(var_idx) = rule.query.capture_index_for_name("lock_var") {
-                                let mut lock_var = String::new();
-                                let mut line = 0;
-
-                                for capture in m.captures {
-                                    if capture.index == var_idx {
-                                        lock_var = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
-                                    }
-                                    if capture.index == lock_idx {
-                                        line = capture.node.start_position().row + 1;
-                                    }
-                                }
-
-                                // 检查方法内是否有配对的 unlock()
-                                // 向上查找 method_declaration
-                                if let Some(lock_node) = m.captures.iter().find(|c| c.index == lock_idx).map(|c| c.node) {
-                                    let mut current = lock_node.parent();
-                                    let mut method_node = None;
-                                    
-                                    while let Some(n) = current {
-                                        if n.kind() == "method_declaration" {
-                                            method_node = Some(n);
-                                            break;
-                                        }
-                                        current = n.parent();
-                                    }
-
-                                    if let Some(method) = method_node {
-                                        let method_text = method.utf8_text(code.as_bytes()).unwrap_or("");
-                                        let unlock_in_finally = format!("{lock_var}.unlock()");
-                                        let has_finally = method_text.contains("finally");
-                                        
-                                        // 如果没有 finally 块或 finally 中没有 unlock
-                                        if !has_finally || !method_text.contains(&unlock_in_finally) {
-                                            issues.push(Issue {
-                                                id: rule.id.to_string(),
-                                                severity: rule.severity,
-                                                file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                                line,
-                                                description: format!("{} (Lock: {})", rule.description, lock_var),
-                                                context: Some(lock_var),
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    // v7.0 AST 迁移规则 - 通用处理
-                    "ASYNC_DEFAULT_POOL" | "SCHEDULED_FIXED_RATE" | "AUTOWIRED_FIELD" => {
-                        // Spring 注解规则 - 匹配 @method 或 @field
-                        let target_idx = rule.query.capture_index_for_name("method")
-                            .or_else(|| rule.query.capture_index_for_name("field"));
-                        
-                        if let Some(idx) = target_idx {
-                            for capture in m.captures {
-                                if capture.index == idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "FLUX_BLOCK" | "FLUX_COLLECT_LIST" | "PARALLEL_NO_RUN_ON" => {
-                        // 响应式编程规则 - 匹配 @call
-                        if let Some(call_idx) = rule.query.capture_index_for_name("call") {
-                            for capture in m.captures {
-                                if capture.index == call_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    let method_text = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: Some(method_text),
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "SUBSCRIBE_NO_ERROR" => {
-                        // v9.0 修复：检查 subscribe() 的参数数量
-                        // 正确的 subscribe 应该至少有 2 个参数 (onNext, onError)
-                        // subscribe() - 0 参数，有问题
-                        // subscribe(onNext) - 1 参数，有问题
-                        // subscribe(onNext, onError) - 2 参数，OK
-                        if let Some(call_idx) = rule.query.capture_index_for_name("call") {
-                            for capture in m.captures {
-                                if capture.index == call_idx {
-                                    let node = capture.node;
-                                    // 获取 arguments 子节点
-                                    let mut arg_count = 0;
-                                    for child in node.children(&mut node.walk()) {
-                                        if child.kind() == "argument_list" {
-                                            // 统计 argument_list 中的参数数量
-                                            for arg_child in child.children(&mut child.walk()) {
-                                                // 过滤掉逗号和括号
-                                                if arg_child.kind() != "," &&
-                                                   arg_child.kind() != "(" &&
-                                                   arg_child.kind() != ")" {
-                                                    arg_count += 1;
-                                                }
-                                            }
-                                            break;
-                                        }
-                                    }
-
-                                    // 只有当参数数量 < 2 时才报告
-                                    if arg_count < 2 {
-                                        let line = node.start_position().row + 1;
-                                        let method_text = node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
-                                        issues.push(Issue {
-                                            id: rule.id.to_string(),
-                                            severity: rule.severity,
-                                            file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                            line,
-                                            description: format!("{} (参数数量: {})", rule.description, arg_count),
-                                            context: Some(method_text),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    // 第二批 AST 规则 - GC 和 Spring 相关
-                    "FINALIZE_OVERRIDE" | "CACHEABLE_NO_KEY" | "TRANSACTIONAL_REQUIRES_NEW" => {
-                        // 方法级规则 - 匹配 @method
-                        if let Some(method_idx) = rule.query.capture_index_for_name("method") {
-                            for capture in m.captures {
-                                if capture.index == method_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "STRING_INTERN" => {
-                        // intern() 调用 - 匹配 @call
-                        if let Some(call_idx) = rule.query.capture_index_for_name("call") {
-                            for capture in m.captures {
-                                if capture.index == call_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "SOFT_REFERENCE" | "OBJECT_IN_LOOP" => {
-                        // 对象创建规则 - 匹配 @creation
-                        if let Some(creation_idx) = rule.query.capture_index_for_name("creation") {
-                            for capture in m.captures {
-                                if capture.index == creation_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    // 第三批 AST 规则 - 阻塞调用和锁
-                    "FUTURE_GET_NO_TIMEOUT" | "AWAIT_NO_TIMEOUT" | "COMPLETABLE_JOIN" | "EMITTER_UNBOUNDED" => {
-                        // 方法调用检测 - 检查参数列表是否为空
-                        if let Some(call_idx) = rule.query.capture_index_for_name("call") {
-                            if let Some(args_idx) = rule.query.capture_index_for_name("args") {
-                                let mut args_node = None;
-                                let mut line = 0;
-                                
-                                for capture in m.captures {
-                                    if capture.index == args_idx {
-                                        args_node = Some(capture.node);
-                                    }
-                                    if capture.index == call_idx {
-                                        line = capture.node.start_position().row + 1;
-                                    }
-                                }
-                                
-                                // 只有参数列表为空时才报告 (无超时)
-                                if let Some(args) = args_node {
-                                    if args.child_count() <= 2 { // 只有 ( 和 )
-                                        issues.push(Issue {
-                                            id: rule.id.to_string(),
-                                            severity: rule.severity,
-                                            file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                            line,
-                                            description: rule.description.to_string(),
-                                            context: None,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    "LOG_STRING_CONCAT" => {
-                        // 日志字符串拼接检测
-                        if let Some(call_idx) = rule.query.capture_index_for_name("call") {
-                            for capture in m.captures {
-                                if capture.index == call_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "SYNC_BLOCK" => {
-                        // synchronized 代码块检测
-                        if let Some(sync_idx) = rule.query.capture_index_for_name("sync") {
-                            for capture in m.captures {
-                                if capture.index == sync_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    // 第四批 AST 规则 - Executors/Catch/IO/Atomic/Sinks/Cache
-                    "UNBOUNDED_POOL" | "SINKS_MANY" | "CACHE_NO_EXPIRE" | "DATASOURCE_NO_POOL" => {
-                        // 方法调用类规则 - 匹配 @call
-                        if let Some(call_idx) = rule.query.capture_index_for_name("call") {
-                            for capture in m.captures {
-                                if capture.index == call_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "EMPTY_CATCH" => {
-                        // 空 catch 块检测 - 检查 body 是否为空
-                        if let Some(catch_idx) = rule.query.capture_index_for_name("catch") {
-                            if let Some(body_idx) = rule.query.capture_index_for_name("body") {
-                                let mut body_node = None;
-                                let mut line = 0;
-                                
-                                for capture in m.captures {
-                                    if capture.index == body_idx {
-                                        body_node = Some(capture.node);
-                                    }
-                                    if capture.index == catch_idx {
-                                        line = capture.node.start_position().row + 1;
-                                    }
-                                }
-                                
-                                // 只有 { } 或只有空白/注释时报告
-                                if let Some(body) = body_node {
-                                    let body_text = body.utf8_text(code.as_bytes()).unwrap_or("{}");
-                                    let inner = body_text.trim_start_matches('{').trim_end_matches('}').trim();
-                                    // 空或只有打印语句
-                                    if inner.is_empty() || inner.contains(".print") {
-                                        issues.push(Issue {
-                                            id: rule.id.to_string(),
-                                            severity: rule.severity,
-                                            file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                            line,
-                                            description: rule.description.to_string(),
-                                            context: None,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    "BLOCKING_IO" | "ATOMIC_SPIN" => {
-                        // 对象创建类规则
-                        if let Some(creation_idx) = rule.query.capture_index_for_name("creation") {
-                            for capture in m.captures {
-                                if capture.index == creation_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "STATIC_COLLECTION" => {
-                        // static 集合检测 - 检查 modifiers 是否包含 static
-                        if let Some(field_idx) = rule.query.capture_index_for_name("field") {
-                            if let Some(mods_idx) = rule.query.capture_index_for_name("mods") {
-                                let mut is_static = false;
-                                let mut line = 0;
-                                
-                                for capture in m.captures {
-                                    if capture.index == mods_idx {
-                                        let mods_text = capture.node.utf8_text(code.as_bytes()).unwrap_or("");
-                                        is_static = mods_text.contains("static");
-                                    }
-                                    if capture.index == field_idx {
-                                        line = capture.node.start_position().row + 1;
-                                    }
-                                }
-                                
-                                if is_static {
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    // 最终批次 AST 规则
-                    "STRING_CONCAT_LOOP" => {
-                        // 循环内 += 拼接检测
-                        if let Some(assign_idx) = rule.query.capture_index_for_name("assign") {
-                            for capture in m.captures {
-                                if capture.index == assign_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "LARGE_ARRAY" => {
-                        // 大数组分配检测 - 检查数组大小
-                        if let Some(creation_idx) = rule.query.capture_index_for_name("creation") {
-                            if let Some(size_idx) = rule.query.capture_index_for_name("size") {
-                                let mut size_value: i64 = 0;
-                                let mut line = 0;
-                                
-                                for capture in m.captures {
-                                    if capture.index == size_idx {
-                                        let size_text = capture.node.utf8_text(code.as_bytes()).unwrap_or("0");
-                                        size_value = size_text.parse().unwrap_or(0);
-                                    }
-                                    if capture.index == creation_idx {
-                                        line = capture.node.start_position().row + 1;
-                                    }
-                                }
-                                
-                                // 只有大于 1MB (1_000_000 bytes) 才报告
-                                if size_value >= 1_000_000 {
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: format!("{} (size: {})", rule.description, size_value),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    // v8.0 Java 现代化规则 - VIRTUAL_THREAD_PINNING 已合并到 SYNC_BLOCK
-                    "GRAALVM_CLASS_FORNAME" | "GRAALVM_METHOD_INVOKE" | "GRAALVM_PROXY" => {
-                        // GraalVM 反射检测
-                        if let Some(call_idx) = rule.query.capture_index_for_name("call") {
-                            for capture in m.captures {
-                                if capture.index == call_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    // ====== v9.0 新增规则处理器 ======
-                    "DOUBLE_CHECKED_LOCKING" => {
-                        // 检测 if { synchronized { if } } 模式
-                        if let Some(outer_idx) = rule.query.capture_index_for_name("outer_if") {
-                            for capture in m.captures {
-                                if capture.index == outer_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: Some("Double-Checked Locking".to_string()),
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "COMPLETABLE_GET_NO_TIMEOUT" => {
-                        // 检测 .get() 调用且参数列表为空
-                        if let Some(call_idx) = rule.query.capture_index_for_name("call") {
-                            if let Some(args_idx) = rule.query.capture_index_for_name("args") {
-                                let mut args_node = None;
-                                let mut line = 0;
-
-                                for capture in m.captures {
-                                    if capture.index == args_idx {
-                                        args_node = Some(capture.node);
-                                    }
-                                    if capture.index == call_idx {
-                                        line = capture.node.start_position().row + 1;
-                                    }
-                                }
-
-                                // 只有参数列表为空时才报告
-                                if let Some(args) = args_node {
-                                    if args.child_count() <= 2 { // 只有 ( 和 )
-                                        issues.push(Issue {
-                                            id: rule.id.to_string(),
-                                            severity: rule.severity,
-                                            file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                            line,
-                                            description: rule.description.to_string(),
-                                            context: Some(".get() without timeout".to_string()),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    "TRANSACTION_SELF_CALL" => {
-                        // @Transactional 方法内调用其他方法
-                        if let Some(method_idx) = rule.query.capture_index_for_name("method") {
-                            for capture in m.captures {
-                                if capture.index == method_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "VOLATILE_ARRAY" => {
-                        // volatile 数组检测 - 检查 modifiers 是否包含 volatile
-                        if let Some(field_idx) = rule.query.capture_index_for_name("field") {
-                            if let Some(mods_idx) = rule.query.capture_index_for_name("mods") {
-                                let mut is_volatile = false;
-                                let mut line = 0;
-
-                                for capture in m.captures {
-                                    if capture.index == mods_idx {
-                                        let mods_text = capture.node.utf8_text(code.as_bytes()).unwrap_or("");
-                                        is_volatile = mods_text.contains("volatile");
-                                    }
-                                    if capture.index == field_idx {
-                                        line = capture.node.start_position().row + 1;
-                                    }
-                                }
-
-                                if is_volatile {
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "SYSTEM_EXIT" | "RUNTIME_EXEC" => {
-                        // 方法调用类规则
-                        if let Some(call_idx) = rule.query.capture_index_for_name("call") {
-                            for capture in m.captures {
-                                if capture.index == call_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "SIMPLE_DATE_FORMAT" => {
-                        // SimpleDateFormat 创建检测
-                        if let Some(creation_idx) = rule.query.capture_index_for_name("creation") {
-                            for capture in m.captures {
-                                if capture.index == creation_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "RANDOM_SHARED" => {
-                        // 共享 Random 字段检测 - 检查是否是 static 字段
-                        if let Some(field_idx) = rule.query.capture_index_for_name("field") {
-                            if let Some(mods_idx) = rule.query.capture_index_for_name("mods") {
-                                let mut is_static = false;
-                                let mut line = 0;
-
-                                for capture in m.captures {
-                                    if capture.index == mods_idx {
-                                        let mods_text = capture.node.utf8_text(code.as_bytes()).unwrap_or("");
-                                        is_static = mods_text.contains("static");
-                                    }
-                                    if capture.index == field_idx {
-                                        line = capture.node.start_position().row + 1;
-                                    }
-                                }
-
-                                if is_static {
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    // ====== v9.1 从 Regex 迁移的规则处理 ======
-                    "SELECT_STAR" | "LIKE_LEADING_WILDCARD" => {
-                        // SQL 字符串检测 - 匹配 @str
-                        if let Some(str_idx) = rule.query.capture_index_for_name("str") {
-                            for capture in m.captures {
-                                if capture.index == str_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    let str_content = capture.node.utf8_text(code.as_bytes()).unwrap_or("");
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: Some(str_content.chars().take(50).collect::<String>() + "..."),
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    "HTTP_CLIENT_TIMEOUT" => {
-                        // HTTP 客户端调用检测 - 匹配 @call
-                        if let Some(call_idx) = rule.query.capture_index_for_name("call") {
-                            for capture in m.captures {
-                                if capture.index == call_idx {
-                                    let line = capture.node.start_position().row + 1;
-                                    issues.push(Issue {
-                                        id: rule.id.to_string(),
-                                        severity: rule.severity,
-                                        file: file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                                        line,
-                                        description: rule.description.to_string(),
-                                        context: None,
-                                    });
-                                }
-                            }
-                        }
-                    },
-                    _ => {}
+                if let Some(issue) = rule.handler.handle(
+                    &rule.query,
+                    &m,
+                    rule.id,
+                    rule.severity,
+                    rule.description,
+                    &rule_ctx,
+                ) {
+                    issues.push(issue);
                 }
             }
         }
@@ -1760,6 +991,44 @@ mod tests {
         
         assert_eq!(issues[1].id, "N_PLUS_ONE");
         assert!(issues[1].context.as_ref().unwrap().contains("findById"));
+    }
+
+    #[test]
+    fn test_extract_call_sites() {
+        let code = r#"
+            public class UserService {
+                public void getUsers() {
+                    userRepository.findAll();
+                    orderService.processOrders();
+                }
+                
+                public void saveUser(User user) {
+                    userRepository.save(user);
+                }
+            }
+        "#;
+        
+        let file = PathBuf::from("UserService.java");
+        let analyzer = JavaTreeSitterAnalyzer::new().unwrap();
+        let call_sites = analyzer.extract_call_sites(code, &file).unwrap();
+
+        // 应该提取到 3 个调用点
+        assert_eq!(call_sites.len(), 3, "Should extract 3 call sites");
+        
+        // 验证第一个调用: getUsers -> userRepository.findAll
+        assert_eq!(call_sites[0].0, "getUsers"); // caller
+        assert_eq!(call_sites[0].1, "userRepository"); // receiver
+        assert_eq!(call_sites[0].2, "findAll"); // callee
+        
+        // 验证第二个调用: getUsers -> orderService.processOrders
+        assert_eq!(call_sites[1].0, "getUsers");
+        assert_eq!(call_sites[1].1, "orderService");
+        assert_eq!(call_sites[1].2, "processOrders");
+        
+        // 验证第三个调用: saveUser -> userRepository.save
+        assert_eq!(call_sites[2].0, "saveUser");
+        assert_eq!(call_sites[2].1, "userRepository");
+        assert_eq!(call_sites[2].2, "save");
     }
 
     #[test]
