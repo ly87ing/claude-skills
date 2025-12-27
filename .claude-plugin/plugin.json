@@ -2,7 +2,10 @@
   "name": "java-perf",
   "version": "8.0.0",
   "description": "Java performance diagnostics using AST analysis. Identifies N+1 queries, memory leaks, lock contention, and concurrency risks.",
-  "author": "ly87ing",
+  "author": {
+    "name": "ly87ing",
+    "url": "https://github.com/ly87ing"
+  },
   "repository": "https://github.com/ly87ing/java-perf-skill",
   "license": "MIT"
 }
