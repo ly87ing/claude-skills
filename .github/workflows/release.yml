@@ -35,7 +35,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build
-        working-directory: rust
+        working-directory: plugins/java-perf/rust
         run: |
           cargo build --release --target ${{ matrix.target }}
           cp target/${{ matrix.target }}/release/java-perf ${{ matrix.artifact }}
@@ -44,7 +44,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: rust/${{ matrix.artifact }}
+          path: plugins/java-perf/rust/${{ matrix.artifact }}
 
   release:
     needs: build

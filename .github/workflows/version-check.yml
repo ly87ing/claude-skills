@@ -3,16 +3,16 @@ name: Version Check
 on:
   push:
     paths:
-      - 'rust/Cargo.toml'
-      - 'rust/README.md'
-      - 'rust/CHANGELOG.md'
-      - 'skills/java-perf/SKILL.md'
+      - 'VERSION'
+      - 'plugins/java-perf/rust/Cargo.toml'
+      - 'plugins/java-perf/.claude-plugin/plugin.json'
+      - '.claude-plugin/marketplace.json'
   pull_request:
     paths:
-      - 'rust/Cargo.toml'
-      - 'rust/README.md'
-      - 'rust/CHANGELOG.md'
-      - 'skills/java-perf/SKILL.md'
+      - 'VERSION'
+      - 'plugins/java-perf/rust/Cargo.toml'
+      - 'plugins/java-perf/.claude-plugin/plugin.json'
+      - '.claude-plugin/marketplace.json'
 
 jobs:
   version-consistency:
@@ -21,4 +21,24 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Check version consistency
-        run: ./scripts/sync-version.sh --check
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          echo "Expected version: $VERSION"
+          
+          # Check Cargo.toml
+          CARGO_VERSION=$(grep '^version = ' plugins/java-perf/rust/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          if [ "$CARGO_VERSION" != "$VERSION" ]; then
+            echo "❌ Cargo.toml version mismatch: $CARGO_VERSION != $VERSION"
+            exit 1
+          fi
+          echo "✅ Cargo.toml: $CARGO_VERSION"
+          
+          # Check plugin.json
+          PLUGIN_VERSION=$(grep '"version"' plugins/java-perf/.claude-plugin/plugin.json | head -1 | sed 's/.*"\([0-9.]*\)".*/\1/')
+          if [ "$PLUGIN_VERSION" != "$VERSION" ]; then
+            echo "❌ plugin.json version mismatch: $PLUGIN_VERSION != $VERSION"
+            exit 1
+          fi
+          echo "✅ plugin.json: $PLUGIN_VERSION"
+          
+          echo "✅ All versions consistent: $VERSION"
