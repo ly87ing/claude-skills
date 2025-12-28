@@ -16,14 +16,24 @@ Developer Skills marketplace for [Claude Code](https://code.claude.com/) - provi
 
 | Plugin | Description | Version |
 |--------|-------------|---------|
-| [java-perf](./plugins/java-perf/) | Java performance diagnostics using AST analysis. Identifies N+1 queries, memory leaks, lock contention, and concurrency risks. | 8.1.0 |
+| [java-perf](./plugins/java-perf/) | Java performance diagnostics using AST analysis. Identifies N+1 queries, memory leaks, lock contention, and concurrency risks. | 9.5.0 |
 
 ## Version Management
 
-Version is managed via the `VERSION` file. To update version across all config files:
+Each plugin's version is managed via its `.claude-plugin/plugin.json` file (single source of truth).
+
+To sync version across all related files for a plugin:
 
 ```bash
+cd plugins/java-perf
 ./scripts/sync-version.sh
+```
+
+To bump version:
+
+```bash
+cd plugins/java-perf
+./scripts/bump-version.sh patch  # or minor, major
 ```
 
 ## Plugin Development
@@ -36,12 +46,16 @@ dev-skills/
 │   └── marketplace.json      # Marketplace definition
 ├── plugins/
 │   └── java-perf/            # Individual plugin
-│       ├── .claude-plugin/plugin.json
+│       ├── .claude-plugin/plugin.json  # 🔑 Version source of truth
 │       ├── skills/<name>/SKILL.md
 │       ├── hooks/hooks.json
+│       ├── scripts/
+│       │   ├── sync-version.sh   # Sync version to all files
+│       │   ├── bump-version.sh   # Bump version (major/minor/patch)
+│       │   └── release.sh        # Create Git tag
 │       └── rust/             # Plugin-specific code
-├── VERSION                   # Single source of truth for version
-└── scripts/sync-version.sh   # Version sync utility
+└── scripts/
+    └── validate-versions.sh  # CI version validation
 ```
 
 ## References

@@ -1,6 +1,6 @@
 {
   "name": "java-perf",
-  "version": "8.1.0",
+  "version": "9.5.0",
   "description": "Java performance diagnostics using AST analysis. Identifies N+1 queries, memory leaks, lock contention, and concurrency risks.",
   "author": {
     "name": "ly87ing",
