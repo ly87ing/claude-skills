@@ -256,6 +256,7 @@ impl CodeAnalyzer for LineBasedConfigAnalyzer {
                                     line: line_num + 1,
                                     description: format!("{} (Value: {})", rule.description, value_part),
                                     context: Some(line.to_string()),
+                                    confidence: None, // Config rules don't use confidence
                                 });
                              }
                     }
@@ -292,6 +293,7 @@ impl LineBasedConfigAnalyzer {
                     line: 0, // 结构化解析无法获取行号
                     description: format!("数据库连接池过小: {} (建议 >= 10)", pool_size),
                     context: Some(format!("maximum-pool-size: {}", pool_size)),
+                    confidence: None, // Config rules don't use confidence
                 });
             }
         }
@@ -305,6 +307,7 @@ impl LineBasedConfigAnalyzer {
                     line: 0,
                     description: format!("连接超时过长: {}ms (建议 <= 30000)", timeout),
                     context: Some(format!("connection-timeout: {}", timeout)),
+                    confidence: None, // Config rules don't use confidence
                 });
             }
         }
@@ -318,6 +321,7 @@ impl LineBasedConfigAnalyzer {
                 line: 0,
                 description: "JPA open-in-view=true 会导致延迟加载问题".to_string(),
                 context: Some("open-in-view: true".to_string()),
+                confidence: None, // Config rules don't use confidence
             });
         }
         
@@ -329,6 +333,7 @@ impl LineBasedConfigAnalyzer {
                 line: 0,
                 description: "JPA show-sql=true 影响性能".to_string(),
                 context: Some("show-sql: true".to_string()),
+                confidence: None, // Config rules don't use confidence
             });
         }
         
@@ -342,6 +347,7 @@ impl LineBasedConfigAnalyzer {
                     line: 0,
                     description: format!("Tomcat 最大线程数过低: {} (默认 200)", threads),
                     context: Some(format!("max-threads: {}", threads)),
+                    confidence: None, // Config rules don't use confidence
                 });
             }
         }

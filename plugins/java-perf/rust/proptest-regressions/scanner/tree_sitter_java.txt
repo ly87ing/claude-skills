@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b135e4e7098b2379564cd9ac49a8671321b0bc1e9f1956b2205d9695a80c92d5 # shrinks to class_name = "A", package = Some("a")

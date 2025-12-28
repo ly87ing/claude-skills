@@ -9,10 +9,13 @@ mod symbol_table;
 mod project_detector;
 mod rules;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 use anyhow::Result;
+
+// Re-export Command from cli module
+use cli::Command;
 
 /// Java Performance Diagnostics Tool
 ///
@@ -29,83 +32,6 @@ struct Args {
 
     #[command(subcommand)]
     command: Command,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub enum Command {
-    /// 🛰️ 雷达扫描 - 全项目 AST 分析
-    Scan {
-        /// 项目路径
-        #[arg(short, long, default_value = ".")]
-        path: String,
-
-        /// 显示完整结果（默认只显示 P0）
-        #[arg(long)]
-        full: bool,
-
-        /// 最多返回的 P1 数量 (--full 模式)
-        #[arg(long, default_value = "5")]
-        max_p1: usize,
-    },
-
-    /// 🔍 单文件分析
-    Analyze {
-        /// 文件路径
-        #[arg(short, long)]
-        file: String,
-    },
-
-    /// 📋 获取检查清单
-    Checklist {
-        /// 症状列表 (逗号分隔): memory,cpu,slow,resource,backlog,gc
-        #[arg(short, long)]
-        symptoms: String,
-
-        /// 显示完整信息（默认紧凑模式）
-        #[arg(long)]
-        full: bool,
-    },
-
-    /// ⚠️ 列出所有反模式
-    Antipatterns,
-
-    /// 🔬 分析日志文件
-    Log {
-        /// 日志文件路径
-        #[arg(short, long)]
-        file: String,
-    },
-
-    /// 🔬 分析线程 Dump (jstack)
-    Jstack {
-        /// Java 进程 PID
-        #[arg(short, long)]
-        pid: u32,
-    },
-
-    /// 🔬 分析字节码 (javap)
-    Javap {
-        /// 类路径或 .class 文件
-        #[arg(short, long)]
-        class: String,
-    },
-
-    /// 🔬 分析堆内存 (jmap)
-    Jmap {
-        /// Java 进程 PID
-        #[arg(short, long)]
-        pid: u32,
-    },
-
-    /// 📋 项目摘要
-    Summary {
-        /// 项目路径
-        #[arg(short, long, default_value = ".")]
-        path: String,
-    },
-
-    /// ℹ️ 引擎状态
-    Status,
 }
 
 fn main() -> Result<()> {

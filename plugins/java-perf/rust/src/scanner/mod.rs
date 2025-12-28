@@ -15,6 +15,21 @@ pub enum Severity {
     P1, // 警告
 }
 
+/// Confidence level for issue detection
+/// 
+/// Used to indicate how confident the analyzer is about a detected issue.
+/// High confidence means the issue was detected using semantic analysis (FQN resolution),
+/// while Low confidence means heuristic fallback was used.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Confidence {
+    /// High confidence - FQN was resolved successfully
+    High,
+    /// Medium confidence - partial resolution or strong heuristic match
+    Medium,
+    /// Low confidence - heuristic fallback was used
+    Low,
+}
+
 /// 扫描发现的问题
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Issue {
@@ -24,6 +39,14 @@ pub struct Issue {
     pub line: usize,
     pub description: String,
     pub context: Option<String>,
+    /// Confidence level for this issue detection
+    /// 
+    /// - `Some(High)`: FQN was resolved successfully (semantic analysis)
+    /// - `Some(Medium)`: Partial resolution or strong heuristic match
+    /// - `Some(Low)`: Heuristic fallback was used
+    /// - `None`: Confidence not applicable for this rule type
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<Confidence>,
 }
 
 /// 代码分析器 Trait

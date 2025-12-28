@@ -113,6 +113,7 @@ impl CodeAnalyzer for DockerfileAnalyzer {
                         line: line_num + 1,
                         description: rule.description.to_string(),
                         context: Some(trimmed.chars().take(60).collect()),
+                        confidence: None, // Dockerfile rules don't use confidence
                     });
                 }
             }
@@ -138,6 +139,7 @@ impl CodeAnalyzer for DockerfileAnalyzer {
                 line: 1,
                 description: format!("有 {run_count} 个 RUN 命令，建议使用 && 合并减少层数"),
                 context: None,
+                confidence: None, // Dockerfile rules don't use confidence
             });
         }
 
@@ -150,6 +152,7 @@ impl CodeAnalyzer for DockerfileAnalyzer {
                 line: 1,
                 description: "apt-get install 后未清理缓存，镜像体积增大".to_string(),
                 context: None,
+                confidence: None, // Dockerfile rules don't use confidence
             });
         }
 

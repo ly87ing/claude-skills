@@ -4,7 +4,7 @@ use std::path::Path;
 use std::cell::RefCell;
 use anyhow::{Result, anyhow};
 use tree_sitter::{Parser, Query, QueryCursor, Tree};
-use crate::symbol_table::{TypeInfo, VarBinding}; // Import TypeInfo
+use crate::symbol_table::{TypeInfo, VarBinding, ImportIndex}; // Import TypeInfo and ImportIndex
 use crate::symbol_table::SymbolTable;
 use crate::rules::suppression::SuppressionContext;
 
@@ -64,6 +64,8 @@ pub struct JavaTreeSitterAnalyzer {
     call_site_query: Query,
     /// import 语句查询 (用于跨包调用追踪) - v9.5
     import_query: Query,
+    /// package 声明查询 (用于 FQN 构建) - v9.6
+    package_query: Query,
 }
 
 impl JavaTreeSitterAnalyzer {
@@ -75,6 +77,7 @@ impl JavaTreeSitterAnalyzer {
         let structure_query = Self::compile_structure_query(&language)?;
         let call_site_query = Self::compile_call_site_query(&language)?; // v9.4: 调用点提取
         let import_query = Self::compile_import_query(&language)?;       // v9.5: import 解析
+        let package_query = Self::compile_package_query(&language)?;     // v9.6: package 声明
         
         Ok(Self {
             language,
@@ -82,6 +85,7 @@ impl JavaTreeSitterAnalyzer {
             structure_query,
             call_site_query,
             import_query,
+            package_query,
         })
     }
 
@@ -733,7 +737,26 @@ impl JavaTreeSitterAnalyzer {
         Query::new(language, query_str).map_err(|e| anyhow!("Failed to compile import query: {e}"))
     }
 
+    /// 编译 Package 声明提取查询 (v9.6)
+    /// Handles both multi-segment packages (scoped_identifier) and single-segment packages (identifier)
+    fn compile_package_query(language: &tree_sitter::Language) -> Result<Query> {
+        let query_str = r#"
+            (package_declaration
+                [
+                    (scoped_identifier) @package_name
+                    (identifier) @package_name
+                ]
+            )
+        "#;
+        Query::new(language, query_str).map_err(|e| anyhow!("Failed to compile package query: {e}"))
+    }
+}
+
+// Test-only public API methods
+#[cfg(test)]
+impl JavaTreeSitterAnalyzer {
     /// 提取 Import 列表 (v9.5)
+    #[allow(dead_code)]
     pub fn extract_imports(&self, code: &str) -> Result<Vec<String>> {
         crate::scanner::tree_sitter_java::with_parser(&self.language, |parser| {
             let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
@@ -754,6 +777,29 @@ impl JavaTreeSitterAnalyzer {
             Ok(imports)
         })
     }
+
+    /// 提取 Package 声明 (v9.6)
+    /// 
+    /// Returns the package name if present, or None for default package
+    pub fn extract_package(&self, code: &str) -> Result<Option<String>> {
+        crate::scanner::tree_sitter_java::with_parser(&self.language, |parser| {
+            let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
+            let root_node = tree.root_node();
+            
+            let mut cursor = tree_sitter::QueryCursor::new();
+            let matches = cursor.matches(&self.package_query, root_node, code.as_bytes());
+            
+            for m in matches {
+                for capture in m.captures {
+                    if let Ok(text) = capture.node.utf8_text(code.as_bytes()) {
+                        return Ok(Some(text.to_string()));
+                    }
+                }
+            }
+            
+            Ok(None)
+        })
+    }
 }
 
 
@@ -769,41 +815,13 @@ impl CodeAnalyzer for JavaTreeSitterAnalyzer {
 }
 
 impl JavaTreeSitterAnalyzer {
-    // ========================================================================
-    // P0 优化: 单次解析 API
-    // ========================================================================
-    //
-    // 提供 extract_and_analyze() 方法，一次解析同时完成：
-    // 1. 符号提取 (Phase 1)
-    // 2. 问题检测 (Phase 2)
-    //
-    // 这避免了之前的 Double Parsing 问题。
-    // ========================================================================
-
-    /// 单次解析：同时提取符号和检测问题 (避免 Double Parsing)
-    ///
-    /// 返回: (符号信息, 问题列表)
-    pub fn extract_and_analyze(
-        &self,
-        code: &str,
-        file_path: &Path,
-        ctx: Option<&SymbolTable>,
-    ) -> Result<((Option<TypeInfo>, Vec<VarBinding>), Vec<Issue>)> {
-        with_parser(&self.language, |parser| {
-            let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
-
-            // Phase 1: 提取符号
-            let symbols = self.extract_symbols_from_tree(&tree, code, file_path)?;
-
-            // Phase 2: 检测问题 (无 CallGraph)
-            let issues = self.analyze_tree_with_context(&tree, code, file_path, ctx, None)?;
-
-            Ok((symbols, issues))
-        })
-    }
-
     /// Phase 1: 提取符号信息 (使用 thread_local Parser)
-    pub fn extract_symbols(&self, code: &str, file_path: &Path) -> Result<(Option<TypeInfo>, Vec<VarBinding>)> {
+    /// 
+    /// Returns: (TypeInfo, Vec<VarBinding>, ImportIndex)
+    /// - TypeInfo: Class/interface information
+    /// - Vec<VarBinding>: Field bindings
+    /// - ImportIndex: Import resolution index for FQN resolution
+    pub fn extract_symbols(&self, code: &str, file_path: &Path) -> Result<(Option<TypeInfo>, Vec<VarBinding>, ImportIndex)> {
         with_parser(&self.language, |parser| {
             let tree = parser.parse(code, None).ok_or_else(|| anyhow!("Failed to parse code"))?;
             self.extract_symbols_from_tree(&tree, code, file_path)
@@ -811,13 +829,21 @@ impl JavaTreeSitterAnalyzer {
     }
 
     /// 从已解析的 Tree 中提取符号 (支持单次解析优化)
-    fn extract_symbols_from_tree(&self, tree: &Tree, code: &str, file_path: &Path) -> Result<(Option<TypeInfo>, Vec<VarBinding>)> {
+    /// 
+    /// v9.6: Now also extracts package declaration and builds ImportIndex
+    fn extract_symbols_from_tree(&self, tree: &Tree, code: &str, file_path: &Path) -> Result<(Option<TypeInfo>, Vec<VarBinding>, ImportIndex)> {
         let mut query_cursor = QueryCursor::new();
         let matches = query_cursor.matches(&self.structure_query, tree.root_node(), code.as_bytes());
 
         let mut type_info: Option<TypeInfo> = None;
         let mut bindings = Vec::new();
         
+        // Extract package declaration
+        let package = self.extract_package_from_tree(tree, code)?;
+        
+        // Extract imports and build ImportIndex
+        let imports = self.extract_imports_from_tree(tree, code)?;
+        let mut import_index = ImportIndex::from_imports(imports, package.clone());
 
         for m in matches {
             // Class/Interface Declaration
@@ -828,7 +854,15 @@ impl JavaTreeSitterAnalyzer {
                     if capture.index == idx {
                         let name = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
                         if type_info.is_none() {
-                            type_info = Some(TypeInfo::new(&name, file_path.to_path_buf(), capture.node.start_position().row + 1));
+                            // v9.6: Create TypeInfo with package for proper FQN
+                            type_info = Some(TypeInfo::new_with_package(
+                                &name,
+                                package.as_deref(),
+                                file_path.to_path_buf(),
+                                capture.node.start_position().row + 1,
+                            ));
+                            // Add local class to ImportIndex for same-package resolution
+                            import_index.add_local_class(&name);
                         }
                     }
                 }
@@ -851,15 +885,15 @@ impl JavaTreeSitterAnalyzer {
             let field_name_idx = self.structure_query.capture_index_for_name("field_name");
             let field_type_idx = self.structure_query.capture_index_for_name("field_type");
             
-            if field_name_idx.is_some() && field_type_idx.is_some() {
+            if let (Some(name_idx), Some(type_idx)) = (field_name_idx, field_type_idx) {
                  let mut f_name = String::new();
                  let mut f_type = String::new();
                  
                  for capture in m.captures {
-                     if capture.index == field_name_idx.unwrap() {
+                     if capture.index == name_idx {
                          f_name = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
                      }
-                     if capture.index == field_type_idx.unwrap() {
+                     if capture.index == type_idx {
                          f_type = capture.node.utf8_text(code.as_bytes()).unwrap_or("").to_string();
                      }
                  }
@@ -870,7 +904,40 @@ impl JavaTreeSitterAnalyzer {
             }
         }
 
-        Ok((type_info, bindings))
+        Ok((type_info, bindings, import_index))
+    }
+
+    /// Extract package declaration from already-parsed tree
+    fn extract_package_from_tree(&self, tree: &Tree, code: &str) -> Result<Option<String>> {
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let matches = cursor.matches(&self.package_query, tree.root_node(), code.as_bytes());
+        
+        for m in matches {
+            for capture in m.captures {
+                if let Ok(text) = capture.node.utf8_text(code.as_bytes()) {
+                    return Ok(Some(text.to_string()));
+                }
+            }
+        }
+        
+        Ok(None)
+    }
+
+    /// Extract imports from already-parsed tree
+    fn extract_imports_from_tree(&self, tree: &Tree, code: &str) -> Result<Vec<String>> {
+        let mut imports = Vec::new();
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let matches = cursor.matches(&self.import_query, tree.root_node(), code.as_bytes());
+        
+        for m in matches {
+            for capture in m.captures {
+                if let Ok(text) = capture.node.utf8_text(code.as_bytes()) {
+                    imports.push(text.to_string());
+                }
+            }
+        }
+        
+        Ok(imports)
     }
 
     /// 提取调用点信息 (用于 CallGraph 构建) - v9.4
@@ -1566,5 +1633,210 @@ mod tests {
         // let analyzer = JavaTreeSitterAnalyzer::new().unwrap();
         // let imports = analyzer.extract_imports(code).unwrap();
         // assert_eq!(imports.len(), 4);
+    }
+
+    // ====== v9.6 Package and FQN Tests ======
+
+    #[test]
+    fn test_extract_package() {
+        let code = r#"
+            package com.example.service;
+            
+            import java.util.List;
+            
+            public class UserService {
+                private UserRepository userRepository;
+            }
+        "#;
+
+        let _file = PathBuf::from("UserService.java");
+        let analyzer = JavaTreeSitterAnalyzer::new().unwrap();
+        let package = analyzer.extract_package(code).unwrap();
+        
+        assert_eq!(package, Some("com.example.service".to_string()));
+    }
+
+    #[test]
+    fn test_extract_package_none() {
+        let code = r#"
+            public class DefaultPackageClass {
+                private String name;
+            }
+        "#;
+
+        let _file = PathBuf::from("DefaultPackageClass.java");
+        let analyzer = JavaTreeSitterAnalyzer::new().unwrap();
+        let package = analyzer.extract_package(code).unwrap();
+        
+        assert_eq!(package, None);
+    }
+
+    #[test]
+    fn test_extract_symbols_with_fqn() {
+        let code = r#"
+            package com.example.repository;
+            
+            import org.springframework.stereotype.Repository;
+            
+            @Repository
+            public class UserRepository {
+                public User findById(Long id) {
+                    return null;
+                }
+            }
+        "#;
+
+        let file = PathBuf::from("UserRepository.java");
+        let analyzer = JavaTreeSitterAnalyzer::new().unwrap();
+        let (type_info, _bindings, import_index) = analyzer.extract_symbols(code, &file).unwrap();
+        
+        let type_info = type_info.expect("Should extract TypeInfo");
+        
+        // Verify FQN is properly constructed
+        assert_eq!(type_info.name, "UserRepository");
+        assert_eq!(type_info.fqn, "com.example.repository.UserRepository");
+        assert_eq!(type_info.package, Some("com.example.repository".to_string()));
+        
+        // Verify local class is added to ImportIndex
+        assert!(import_index.local_classes.contains(&"UserRepository".to_string()));
+        assert_eq!(import_index.package, Some("com.example.repository".to_string()));
+    }
+
+    #[test]
+    fn test_extract_symbols_default_package() {
+        let code = r#"
+            public class SimpleClass {
+                private String name;
+            }
+        "#;
+
+        let file = PathBuf::from("SimpleClass.java");
+        let analyzer = JavaTreeSitterAnalyzer::new().unwrap();
+        let (type_info, _bindings, import_index) = analyzer.extract_symbols(code, &file).unwrap();
+        
+        let type_info = type_info.expect("Should extract TypeInfo");
+        
+        // For default package, FQN equals simple name
+        assert_eq!(type_info.name, "SimpleClass");
+        assert_eq!(type_info.fqn, "SimpleClass");
+        assert_eq!(type_info.package, None);
+        
+        // Local class should still be registered
+        assert!(import_index.local_classes.contains(&"SimpleClass".to_string()));
+    }
+
+    // ====== Property-Based Tests for v9.6 ======
+
+    use proptest::prelude::*;
+
+    /// Strategy to generate valid Java package names
+    fn java_package_strategy() -> impl Strategy<Value = String> {
+        prop::collection::vec("[a-z][a-z0-9]{0,7}", 1..=4)
+            .prop_map(|parts| parts.join("."))
+    }
+
+    /// Strategy to generate valid Java class names (PascalCase)
+    fn java_class_name_strategy() -> impl Strategy<Value = String> {
+        "[A-Z][a-zA-Z0-9]{0,15}".prop_filter("Must be valid class name", |s| {
+            !s.is_empty() && s.chars().next().unwrap().is_uppercase()
+        })
+    }
+
+    proptest! {
+        /// **Feature: java-perf-semantic-analysis, Property 14: Local Class Auto-Registration**
+        /// 
+        /// *For any* class defined in a Java file, it SHALL be automatically added to that 
+        /// file's ImportIndex with its package-qualified FQN.
+        /// 
+        /// **Validates: Requirements 5.4**
+        #[test]
+        fn prop_local_class_auto_registration(
+            class_name in java_class_name_strategy(),
+            package in prop::option::of(java_package_strategy()),
+        ) {
+            // Generate Java code with the given class name and package
+            let code = match &package {
+                Some(pkg) => format!(
+                    r#"
+                    package {};
+                    
+                    public class {} {{
+                        private String field;
+                    }}
+                    "#,
+                    pkg, class_name
+                ),
+                None => format!(
+                    r#"
+                    public class {} {{
+                        private String field;
+                    }}
+                    "#,
+                    class_name
+                ),
+            };
+
+            let file = PathBuf::from(format!("{}.java", class_name));
+            let analyzer = JavaTreeSitterAnalyzer::new().unwrap();
+            let result = analyzer.extract_symbols(&code, &file);
+            
+            prop_assert!(result.is_ok(), "extract_symbols should succeed");
+            let (type_info_opt, _bindings, import_index) = result.unwrap();
+            
+            // Property 1: TypeInfo should be extracted
+            prop_assert!(type_info_opt.is_some(), "TypeInfo should be extracted for class '{}'", class_name);
+            let type_info = type_info_opt.unwrap();
+            
+            // Property 2: Simple name should match
+            prop_assert_eq!(
+                &type_info.name, &class_name,
+                "Simple name should match: expected '{}', got '{}'",
+                class_name, type_info.name
+            );
+            
+            // Property 3: FQN should be properly constructed
+            let expected_fqn = match &package {
+                Some(pkg) => format!("{}.{}", pkg, class_name),
+                None => class_name.clone(),
+            };
+            prop_assert_eq!(
+                &type_info.fqn, &expected_fqn,
+                "FQN should be '{}', got '{}'",
+                expected_fqn, type_info.fqn
+            );
+            
+            // Property 4: Package should match
+            prop_assert_eq!(
+                &type_info.package, &package,
+                "Package should match: expected {:?}, got {:?}",
+                package, type_info.package
+            );
+            
+            // Property 5: Local class should be auto-registered in ImportIndex
+            prop_assert!(
+                import_index.local_classes.contains(&class_name),
+                "Class '{}' should be in ImportIndex.local_classes, but found: {:?}",
+                class_name, import_index.local_classes
+            );
+            
+            // Property 6: ImportIndex package should match
+            prop_assert_eq!(
+                &import_index.package, &package,
+                "ImportIndex.package should match: expected {:?}, got {:?}",
+                package, import_index.package
+            );
+            
+            // Property 7: Local class should be resolvable via ImportIndex
+            if package.is_some() {
+                let known_classes = std::collections::HashMap::new();
+                let resolved = import_index.resolve(&class_name, &known_classes);
+                prop_assert_eq!(
+                    resolved.as_ref(),
+                    Some(&expected_fqn),
+                    "Local class '{}' should resolve to FQN '{}' via ImportIndex",
+                    class_name, expected_fqn
+                );
+            }
+        }
     }
 }

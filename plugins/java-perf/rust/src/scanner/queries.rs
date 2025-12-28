@@ -2,42 +2,23 @@
 //! 
 //! v9.4: 使用 include_str! 在编译时加载 Tree-sitter Query 文件
 //! 保持"单二进制文件"优势，同时允许在 .scm 文件中编辑和维护 Query
+//!
+//! 注意: 当前查询已内联到 tree_sitter_java.rs 的 compile_rules() 中。
+//! 这些外部 .scm 文件保留用于未来的查询外部化重构。
 
-// ============================================================================
-// N+1 问题检测
-// ============================================================================
-
-/// N+1 检测 Query (循环内的方法调用)
-pub const N_PLUS_ONE: &str = include_str!("../../resources/queries/n_plus_one.scm");
-
-// ============================================================================
-// SQL 问题检测
-// ============================================================================
-
-/// SQL 问题检测 Query (SELECT *, LIKE 前导通配符)
-pub const SQL_ISSUES: &str = include_str!("../../resources/queries/sql_issues.scm");
-
-// ============================================================================
-// 并发问题检测
-// ============================================================================
-
-/// 并发问题检测 Query (synchronized, 锁泄漏, ThreadLocal)
-pub const CONCURRENCY: &str = include_str!("../../resources/queries/concurrency.scm");
+// 当前这些查询文件存在但未被使用，因为查询已内联到 compile_rules() 中。
+// 保留此模块结构以便将来重构时使用。
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::Path;
     
     #[test]
-    fn test_queries_load() {
-        // 确保所有 Query 都能正确加载
-        assert!(!N_PLUS_ONE.is_empty());
-        assert!(!SQL_ISSUES.is_empty());
-        assert!(!CONCURRENCY.is_empty());
-        
-        // 验证包含基本结构
-        assert!(N_PLUS_ONE.contains("for_statement"));
-        assert!(SQL_ISSUES.contains("string_literal"));
-        assert!(CONCURRENCY.contains("synchronized"));
+    fn test_query_files_exist() {
+        // 验证查询文件存在（即使当前未使用）
+        let queries_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/queries");
+        assert!(queries_dir.join("n_plus_one.scm").exists(), "n_plus_one.scm should exist");
+        assert!(queries_dir.join("sql_issues.scm").exists(), "sql_issues.scm should exist");
+        assert!(queries_dir.join("concurrency.scm").exists(), "concurrency.scm should exist");
     }
 }

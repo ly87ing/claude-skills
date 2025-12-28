@@ -19,18 +19,10 @@ use std::collections::{HashMap, HashSet};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-/// 抑制前缀
-const SUPPRESS_PREFIX: &str = "java-perf";
-
 /// 抑制指令正则
 static SUPPRESS_COMMENT_REGEX: Lazy<Regex> = Lazy::new(|| {
     // 匹配: java-perf-ignore: RULE_ID 或 java-perf-ignore-next-line: RULE_ID
     Regex::new(r"java-perf-ignore(?:-next-line)?(?:-file)?:\s*([A-Z_,\s]+)").unwrap()
-});
-
-static SUPPRESS_ANNOTATION_REGEX: Lazy<Regex> = Lazy::new(|| {
-    // 匹配: @SuppressWarnings("java-perf:RULE_ID") 或数组形式
-    Regex::new(r#"@SuppressWarnings\s*\(\s*(?:\{[^}]*\}|"[^"]*")\s*\)"#).unwrap()
 });
 
 static RULE_ID_REGEX: Lazy<Regex> = Lazy::new(|| {
@@ -55,8 +47,6 @@ pub struct Suppression {
     pub suppression_type: SuppressionType,
     /// 被抑制的规则 ID (空表示抑制所有)
     pub rule_ids: HashSet<String>,
-    /// 所在行号
-    pub line: usize,
 }
 
 /// 文件抑制上下文
@@ -79,7 +69,7 @@ impl SuppressionContext {
             let line_number = line_num + 1; // 1-based
 
             // 检查注释抑制
-            if let Some(suppression) = parse_comment_suppression(line, line_number) {
+            if let Some(suppression) = parse_comment_suppression(line) {
                 match suppression.suppression_type {
                     SuppressionType::Line => {
                         ctx.line_suppressions
@@ -147,7 +137,7 @@ impl SuppressionContext {
 }
 
 /// 解析注释抑制
-fn parse_comment_suppression(line: &str, line_number: usize) -> Option<Suppression> {
+fn parse_comment_suppression(line: &str) -> Option<Suppression> {
     // 支持两种形式:
     // 1. 纯注释行: // java-perf-ignore: RULE_ID
     // 2. 行内注释: code(); // java-perf-ignore: RULE_ID
@@ -177,7 +167,6 @@ fn parse_comment_suppression(line: &str, line_number: usize) -> Option<Suppressi
         return Some(Suppression {
             suppression_type,
             rule_ids,
-            line: line_number,
         });
     }
 

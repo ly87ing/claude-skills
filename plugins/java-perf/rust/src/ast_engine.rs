@@ -34,7 +34,8 @@ use crate::scanner::tree_sitter_java::JavaTreeSitterAnalyzer;
 use crate::scanner::config::LineBasedConfigAnalyzer;
 use crate::scanner::dockerfile::DockerfileAnalyzer;
 use crate::taint::{CallGraph, MethodSig, LayerType};
-use crate::symbol_table::LayerType as SymbolLayerType;
+use crate::symbol_table::{LayerType as SymbolLayerType, ImportIndex};
+use std::collections::HashMap;
 
 // ============================================================================
 // 规则定义
@@ -114,9 +115,15 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
     let config_analyzer = LineBasedConfigAnalyzer::new().ok();
     let docker_analyzer = DockerfileAnalyzer::new().ok();
 
-    // === Phase 1: Indexing (构建全局符号表 + 调用图) ===
+    // === Phase 1: Indexing (构建全局符号表 + 调用图 + ImportIndex) ===
     // v9.4: 使用 Rayon reduce 并行合并 SymbolTable 和 CallGraph
-    let (symbol_table, call_graph) = if is_dir {
+    // v9.7: 收集 per-file ImportIndex 用于 FQN 解析
+    
+    /// Per-file import index storage
+    /// Maps file path (as String) to ImportIndex for that file
+    type ImportIndexMap = HashMap<String, ImportIndex>;
+    
+    let (symbol_table, call_graph, _import_indices) = if is_dir {
         // 筛选 Java 文件
         let java_files: Vec<_> = entries.iter()
             .filter(|e| e.path().extension().and_then(|e| e.to_str()) == Some("java"))
@@ -128,11 +135,17 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
                 .map(|entry| {
                     let mut local_table = crate::symbol_table::SymbolTable::new();
                     let mut local_graph = CallGraph::new();
+                    let mut local_import_indices: ImportIndexMap = HashMap::new();
                     
                     if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                        // 1. 提取符号和类信息
-                        if let Ok((Some(type_info), bindings)) = java_analyzer.extract_symbols(&content, entry.path()) {
+                        // 1. 提取符号和类信息 (v9.6: now includes ImportIndex)
+                        if let Ok((Some(type_info), bindings, import_index)) = java_analyzer.extract_symbols(&content, entry.path()) {
                             let class_name = type_info.name.clone();
+                            let class_fqn = type_info.fqn.clone(); // v9.8: Use FQN for CallGraph
+                            let file_path_str = entry.path().to_string_lossy().to_string();
+                            
+                            // v9.7: Store ImportIndex for this file
+                            local_import_indices.insert(file_path_str, import_index.clone());
                             
                             // 根据 SymbolTable 的 LayerType 转换为 taint 的 LayerType
                             let layer = match type_info.layer {
@@ -142,43 +155,51 @@ pub fn radar_scan(code_path: &str, compact: bool, max_p1: usize) -> Result<Value
                                 _ => LayerType::Unknown,
                             };
                             
-                            // 注册到 CallGraph
+                            // v9.8: 注册到 CallGraph 使用 FQN
+                            local_graph.register_class(&class_fqn, entry.path().to_path_buf(), layer);
+                            // Also register with simple name for backward compatibility
                             local_graph.register_class(&class_name, entry.path().to_path_buf(), layer);
                             
-                            // 注册到 SymbolTable
-                            local_table.register_class(type_info);
+                            // 注册到 SymbolTable (v9.7: use FQN-based registration)
+                            local_table.register_class_fqn(type_info);
                             for binding in bindings {
                                 local_table.register_field(&class_name, binding);
                             }
                             
                             // 2. 提取调用点并构建 CallGraph
+                            // v9.8: Use FQN resolution for call sites
                             if let Ok(call_sites) = java_analyzer.extract_call_sites(&content, entry.path()) {
                                 for (caller_method, receiver, callee_method, line) in call_sites {
-                                    // 构建调用关系
-                                    // 注意: receiver 可能是字段名，需要通过 SymbolTable 解析实际类型
-                                    // 简化处理: 直接使用 receiver 作为类名（后续可增强）
-                                    let caller = MethodSig::new(&class_name, &caller_method);
-                                    let callee = MethodSig::new(&receiver, &callee_method);
+                                    // v9.8: 构建调用关系，使用 FQN 解析
+                                    // Caller uses the class FQN directly
+                                    let caller = MethodSig::new_fqn(&class_fqn, &caller_method);
+                                    
+                                    // Callee: Try to resolve receiver to FQN using ImportIndex and local SymbolTable
+                                    // Note: receiver 可能是字段名，需要通过 SymbolTable 解析实际类型
+                                    let callee = MethodSig::resolve(&receiver, &callee_method, &import_index, &local_table);
+                                    
                                     local_graph.add_call(caller, callee, entry.path().to_path_buf(), line);
                                 }
                             }
                         }
                     }
-                    (local_table, local_graph)
+                    (local_table, local_graph, local_import_indices)
                 })
                 .reduce(
-                    || (crate::symbol_table::SymbolTable::new(), CallGraph::new()),
-                    |(mut acc_table, mut acc_graph), (table, graph)| {
+                    || (crate::symbol_table::SymbolTable::new(), CallGraph::new(), HashMap::new()),
+                    |(mut acc_table, mut acc_graph, mut acc_imports), (table, graph, imports)| {
                         acc_table.merge(table);
                         acc_graph.merge(graph);
-                        (acc_table, acc_graph)
+                        // v9.7: Merge ImportIndex maps (per-file, no cross-contamination)
+                        acc_imports.extend(imports);
+                        (acc_table, acc_graph, acc_imports)
                     }
                 )
         } else {
-            (crate::symbol_table::SymbolTable::new(), CallGraph::new())
+            (crate::symbol_table::SymbolTable::new(), CallGraph::new(), HashMap::new())
         }
     } else {
-        (crate::symbol_table::SymbolTable::new(), CallGraph::new())
+        (crate::symbol_table::SymbolTable::new(), CallGraph::new(), HashMap::new())
     };
     
     let symbol_table_ref = &symbol_table;
